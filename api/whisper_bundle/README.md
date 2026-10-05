@@ -1,9 +1,11 @@
 # Whisper large-v3 deployment bundle
 
 This bundle contains the Faster-Whisper service code, authenticated job API,
-Python client, tests, and documentation. It supports one model only:
+Python client, tests, and documentation. It supports one transcription model:
 `Systran/faster-whisper-large-v3` at revision
 `edaa852ec7e145841d8ffdb056a99866b5f0a478`.
+Silero VAD is a separate, bundled CPU speech detector; the pipeline does not
+use Pyannote.
 
 ## Checkpoint
 
@@ -24,9 +26,13 @@ Do not delete existing model folders while migrating a deployment.
 
 The service decodes mono and stereo audio with PyAV, keeps the full timeline,
 resamples each channel independently to 16 kHz, and calls the same cached
-large-v3 model sequentially with `vad_filter=False`. Stereo results are sorted
+large-v3 model sequentially with Silero VAD enabled. Original-timeline word
+timestamps are retained. Stereo results are sorted
 by segment start time and channel. Segment and word IDs are stable integers
 within a result.
+`duration_after_vad_seconds` is the sum of retained audio across channels, so
+it can exceed the original duration for stereo; word and segment times remain
+on the original audio timeline.
 
 The response retains the established text, segment, duration, timing, and
 diarization fields. It adds `audio_metadata` and `channel_quality`; the

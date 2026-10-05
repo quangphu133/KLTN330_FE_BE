@@ -12,10 +12,7 @@ import React, {
 import { Tab } from '@/shared/ui/tab/tab';
 import PageBreadcrumb from '@/shared/ui/page-breadcrumb/page-breadcrumb';
 import { Transcript } from './transcript/transcript';
-import {
-  Checklist,
-  ChecklistGroup,
-} from '@/features/calls/call/checklists/checklists';
+import { Checklist } from '@/features/calls/call/checklists/checklists';
 import { Summary } from '@/features/calls/call/summary/summary';
 import {
   useGetMediaFileByIdQuery,
@@ -97,7 +94,11 @@ export const Call = () => {
   const hasMultipleChannels = numChannels > 1;
   const mediaFileId = mediaFileById?.id;
 
-  const { data: mediaFileResult } = useGetMediaFileResultQuery({
+  const {
+    data: mediaFileResult,
+    isLoading: isResultLoading,
+    isError: isResultError,
+  } = useGetMediaFileResultQuery({
     id,
     negativeProbThreshold: 0.15,
     simultaneousSilenceDurationThreshold: 10,
@@ -118,6 +119,7 @@ export const Call = () => {
   const roleRegionIdsRef = useRef<Set<string>>(new Set());
   const [roleDraftError, setRoleDraftError] = useState<string | null>(null);
   const roleDraftDirtyRef = useRef(false);
+  const roleMappingReason = roleMapping?.suggestion_reason ?? roleMapping?.reason;
   const isAdmin = !isDemoMode && profile?.role === 'admin';
 
   const timedWords = useMemo<TimedWord[]>(() => {
@@ -125,11 +127,14 @@ export const Call = () => {
     return chunks.flatMap((chunk) => {
       return (chunk.regions ?? []).flatMap((region) => {
         const wordId = region.wordId ?? region.word_id;
-        const text = mediaFileResult?.stt?.text?.slice(region.startChar, region.endChar)
-          ?? chunk.text.slice(Math.max(0, region.startChar - chunk.startChar), Math.max(0, region.endChar - chunk.startChar));
+        const localStartChar = region.startChar - chunk.startChar;
+        const localEndChar = region.endChar - chunk.startChar;
+        const text = localStartChar >= 0 && localEndChar >= localStartChar && localEndChar <= chunk.text.length
+          ? chunk.text.slice(localStartChar, localEndChar).trim()
+          : '';
         return wordId === undefined || region.startTime == null || region.endTime == null
           ? []
-          : [{ ...region, wordId, text: text.trim() }];
+          : [{ ...region, wordId, text }];
       });
     }).sort((left, right) => left.startTime - right.startTime || left.wordId - right.wordId);
   }, [mediaFileResult?.stt]);
@@ -507,7 +512,6 @@ export const Call = () => {
       Math.abs(word.endTime - endTime) < Math.abs(words[best].endTime - endTime) ? index : best, 0);
     const first = words[Math.min(startIndex, endIndex)];
     const last = words[Math.max(startIndex, endIndex)];
-    region.setOptions({ start: first.startTime, end: last.endTime, channelIdx: 0 });
     roleDraftDirtyRef.current = true;
     setRoleDraftError(null);
     setDraftRegions((previous) => {
@@ -532,6 +536,7 @@ export const Call = () => {
       if (!region.id.startsWith('region-') || !region.drag || !region.resize) return;
       roleRegionIdsRef.current.add(region.id);
       region.setOptions({ color: 'rgba(147, 51, 234, 0.28)', channelIdx: 0 });
+      region.element.style.zIndex = '7';
       setSelectedDraftRegionId(region.id);
       snapDraftRegion(region);
       region.on('update', () => { roleDraftDirtyRef.current = true; });
@@ -585,6 +590,7 @@ export const Call = () => {
           resize: true,
           channelIdx: 0,
         });
+        region.element.style.zIndex = '7';
         roleRegionIdsRef.current.add(region.id);
         region.on('update', () => { roleDraftDirtyRef.current = true; });
         region.on('update-end', () => snapDraftRegion(region));
@@ -778,52 +784,6 @@ export const Call = () => {
     duration: `${formatTime(currentTime)} / ${formatTime(duration)}`,
   };
 
-  const generateChecklistData = (): ChecklistGroup[] => {
-    const baseGroup = {
-      name: 'CÁCH THỨC HỘI THOẠI',
-      items: [
-        {
-          criteriaGroup: 'CÁCH THỨC HỘI THOẠI',
-          criteria: 'Tính chính xác của lời chào',
-          score: 5,
-          maxScore: 5,
-          explanation:
-            'Điều hành viên đã chào khách hàng đúng cách bằng câu "Chào bạn", giới thiệu tên và tên trung tâm cuộc gọi',
-        },
-        {
-          criteriaGroup: 'CÁCH THỨC HỘI THOẠI',
-          criteria: 'Sự lịch sự',
-          score: 10,
-          maxScore: 10,
-          explanation:
-            'Nhân viên có giọng nói nhẹ nhàng, dùng từ ngữ lịch sự và thể hiện thái độ tôn trọng khách hàng.',
-        },
-        {
-          criteriaGroup: 'CÁCH THỨC HỘI THOẠI',
-          criteria: 'Tính chuẩn mực trong lời nói',
-          score: 15,
-          maxScore: 15,
-          explanation:
-            'Điều hành viên không mắc lỗi phát âm hoặc diễn đạt câu',
-        },
-        {
-          criteriaGroup: 'CÁCH THỨC HỘI THOẠI',
-          criteria: 'Tính chính xác khi kết thúc cuộc gọi',
-          score: 5,
-          maxScore: 5,
-          explanation:
-            'Điều hành viên chúc khách hàng một ngày tốt lành và thể hiện sẵn sàng hỗ trợ trong tương lai',
-        },
-      ],
-      totalScore: 35,
-      maxTotalScore: 35,
-    };
-
-    const secondGroup = JSON.parse(JSON.stringify(baseGroup));
-    return [baseGroup, secondGroup];
-  };
-
-  const checklistData = generateChecklistData();
   const playbackRates = ['1x', '1.25x', '1.5x'];
 
   const summaryContent =
@@ -1004,7 +964,9 @@ export const Call = () => {
                   {isConfirmedMonoRoleMap || canAdminCorrectStereo ? 'Admin chỉnh sửa vai trò người nói' : 'Admin xác nhận vai trò người nói'}
                 </h3>
                 <p className="mt-1 text-sm text-purple-700 dark:text-purple-300">
-                  {roleMapping?.suggestion_reason ?? roleMapping?.reason ?? 'Kiểm tra phân vai trước khi máy chủ tính điểm tuân thủ.'}
+                  {roleMappingReason === 'mono_requires_manual_word_roles'
+                    ? 'Bản ghi đơn kênh cần quản trị viên gán vai trò cho từng từ trước khi tính điểm.'
+                    : roleMappingReason ?? 'Kiểm tra phân vai trước khi máy chủ tính điểm tuân thủ.'}
                 </p>
                 {roleMapping?.source === 'regex' && <p className="mt-1 text-sm text-purple-700 dark:text-purple-300">Gợi ý tự động dựa trên câu mở đầu; admin có thể sửa trước khi xác nhận.</p>}
                 {roleMapping?.agent_speaker_id?.startsWith('CHANNEL_') && <p className="mt-1 text-sm text-purple-700 dark:text-purple-300">Kết quả hiện tại: {roleMapping.agent_speaker_id.replace('CHANNEL_', 'Kênh ')} là nhân viên. Chọn kênh khác để sửa phân vai.</p>}
@@ -1109,8 +1071,11 @@ export const Call = () => {
         )}
         {activeTab === CallTab.Checklists && (
           <Checklist
-            checklistData={checklistData}
-            gptChecklist={mediaFileResult?.gptChecklist}
+            complianceScore={mediaFileResult?.complianceScore}
+            findings={mediaFileResult?.keywordsSearchResult?.regions}
+            roleMapping={mediaFileResult?.roleMapping}
+            isLoading={isResultLoading}
+            isError={isResultError}
           />
         )}
       </div>

@@ -71,7 +71,8 @@ The established status and result fields remain. The result includes
 `audio_metadata` and `channel_quality` objects. Each segment has a `channel`
 integer; its `words` include globally unique integer IDs and word timestamps.
 `model_path` is removed from public responses. Language is fixed to
-Vietnamese, beam size to 5, and VAD is disabled.
+Vietnamese, beam size to 5, and Silero VAD is enabled to skip detected
+non-speech regions while retaining original-timeline timestamps.
 
 Only mono or stereo inputs are accepted. Original sample rate, channel count,
 and duration are reported. Stereo channels are resampled separately and

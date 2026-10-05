@@ -27,8 +27,9 @@ path. No Hugging Face token is required for the public model.
 
 PyAV decodes one or two channels and resamples each channel independently to
 16 kHz float audio. The original duration and silence remain on the timeline.
-The function uses Vietnamese, beam size 5, word timestamps, and
-`vad_filter=False`. One model instance is cached per process; jobs and stereo
+The function uses Vietnamese, beam size 5, word timestamps, and Silero VAD with
+threshold `0.5`, minimum speech duration `0 ms`, minimum silence duration
+`500 ms`, and `400 ms` speech padding. One model instance is cached per process; jobs and stereo
 channels are serialized through one lock.
 
 Each segment contains the original transcript fields plus `channel` and a

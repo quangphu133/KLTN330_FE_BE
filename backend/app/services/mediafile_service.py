@@ -281,7 +281,10 @@ class MediaFileService:
                 "snippet": v.snippet,
                 "severity": v.severity,
                 "deduction": v.deduction,
-                "hasTimestamp": not v.violation_type.startswith("missing_"),
+                "hasTimestamp": (
+                    v.timestamp is not None
+                    and not v.violation_type.startswith("missing_")
+                ),
                 "startChar": 0,
                 "endChar": 0,
                 "startTime": v.timestamp or 0.0,

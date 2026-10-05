@@ -290,7 +290,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     // <div  /*className="max-h-[calc(100vh-480px)] overflow-y-hidden"*/>
     <div
       ref={containerRef}
-      className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-2 overflow-y-hidden"
+      className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-2"
     >
       <div className="flex flex-col gap-6 p-4">
         <div className="items-center justify-between mb-6">
@@ -332,7 +332,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
           {/* </div> */}
         </div>
       </div>
-      <div className="flex flex-col gap-6 p-4 1max-h-[calc(100vh-500px)] overflow-y-auto">
+      <div className="flex flex-col gap-6 p-4 max-h-[70vh] overflow-y-auto">
         {messages.map((message) => {
           const isRightAligned = !message.isMono && message.sender === 'agent';
           return (

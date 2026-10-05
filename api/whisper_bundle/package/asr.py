@@ -276,6 +276,7 @@ def transcribe_audio(
         channel_texts: list[str] = []
         words_with_timestamps = 0
         words_without_timestamps = 0
+        duration_after_vad_seconds = 0.0
         first_info = None
         for channel_index, channel_samples in enumerate(audio_channels):
             segments_iter, info = loaded_model.transcribe(
@@ -286,10 +287,20 @@ def transcribe_audio(
                 temperature=0.0,
                 condition_on_previous_text=False,
                 word_timestamps=True,
-                vad_filter=False,
+                vad_filter=True,
+                vad_parameters={
+                    "threshold": 0.5,
+                    "min_speech_duration_ms": 0,
+                    "min_silence_duration_ms": 500,
+                    "speech_pad_ms": 400,
+                },
             )
             if first_info is None:
                 first_info = info
+            channel_duration_after_vad = _finite_or_none(info.duration_after_vad)
+            if channel_duration_after_vad is None or channel_duration_after_vad < 0:
+                raise ValueError("Whisper returned an invalid post-VAD duration")
+            duration_after_vad_seconds += channel_duration_after_vad
             channel_text = []
             for segment in segments_iter:
                 segment_text = segment.text.strip()
@@ -353,7 +364,7 @@ def transcribe_audio(
         "language_detected": first_info.language,
         "language_probability": _finite_or_none(first_info.language_probability),
         "duration_seconds": duration,
-        "duration_after_vad_seconds": duration,
+        "duration_after_vad_seconds": duration_after_vad_seconds,
         "model_load_seconds": model_load_seconds,
         "inference_seconds": inference_seconds,
         "processing_seconds": model_load_seconds + inference_seconds,

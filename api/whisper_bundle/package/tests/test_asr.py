@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+from faster_whisper.vad import VadOptions, get_speech_timestamps
 
 from whisper_bundle.package import asr
 
@@ -58,7 +59,7 @@ class FakeWhisperModel:
 
         return generate(), SimpleNamespace(
             duration=1.0,
-            duration_after_vad=1.0,
+            duration_after_vad=0.0 if type(self).empty else 0.75,
             language="vi",
             language_probability=1.0,
         )
@@ -97,7 +98,7 @@ class AsrFunctionTests(unittest.TestCase):
         self.patch_model.stop()
         self.temp_dir.cleanup()
 
-    def test_reuses_one_model_for_mono_and_disables_vad(self) -> None:
+    def test_reuses_one_model_for_mono_and_enables_configured_vad(self) -> None:
         first = asr.transcribe_audio(self.audio)
         second = asr.transcribe_audio(self.audio)
 
@@ -105,13 +106,40 @@ class AsrFunctionTests(unittest.TestCase):
         self.assertGreater(first["model_load_seconds"], 0)
         self.assertEqual(second["model_load_seconds"], 0.0)
         self.assertEqual(first["text"], "left")
+        self.assertEqual(first["duration_seconds"], 1.0)
+        self.assertEqual(first["duration_after_vad_seconds"], 0.75)
         self.assertIsNone(first["files"])
         self.assertEqual(first["word_timestamp_count"], 1)
         self.assertEqual(first["segments"][0]["channel"], 0)
         self.assertEqual(first["segments"][0]["words"][0]["id"], 0)
         self.assertFalse(first["channel_quality"]["auto_role_eligible"])
         self.assertIn("mono_audio", first["channel_quality"]["reasons"])
-        self.assertTrue(all(call[1]["vad_filter"] is False for call in FakeWhisperModel.calls))
+        self.assertTrue(all(call[1]["vad_filter"] is True for call in FakeWhisperModel.calls))
+        self.assertTrue(
+            all(
+                call[1]["vad_parameters"]
+                == {
+                    "threshold": 0.5,
+                    "min_speech_duration_ms": 0,
+                    "min_silence_duration_ms": 500,
+                    "speech_pad_ms": 400,
+                }
+                for call in FakeWhisperModel.calls
+            )
+        )
+
+    def test_silero_vad_returns_no_speech_for_digital_silence(self) -> None:
+        silence = np.zeros(12 * 16000, dtype=np.float32)
+        intervals = get_speech_timestamps(
+            silence,
+            VadOptions(
+                threshold=0.5,
+                min_speech_duration_ms=0,
+                min_silence_duration_ms=500,
+                speech_pad_ms=400,
+            ),
+        )
+        self.assertEqual(intervals, [])
 
     def test_stereo_transcribes_sequentially_merges_and_assigns_stable_ids(self) -> None:
         stereo = np.stack(
@@ -132,6 +160,8 @@ class AsrFunctionTests(unittest.TestCase):
             [item["words"][0]["id"] for item in result["segments"]], [0, 1]
         )
         self.assertEqual(result["text"], "left right")
+        self.assertEqual(result["duration_after_vad_seconds"], 1.5)
+        self.assertEqual(result["duration_seconds"], 1.0)
         self.assertEqual(
             result["audio_metadata"],
             {"num_channels": 2, "sample_rate": 44100, "duration_seconds": 1.0},
@@ -151,6 +181,7 @@ class AsrFunctionTests(unittest.TestCase):
         self.assertFalse(result["channel_quality"]["auto_role_eligible"])
         self.assertIn("channel_0_transcript_empty", result["channel_quality"]["reasons"])
         self.assertEqual(result["segments"], [])
+        self.assertEqual(result["duration_after_vad_seconds"], 0.0)
 
     def test_quality_detects_silent_and_gain_normalized_duplicate_channels(self) -> None:
         silent = np.zeros((2, 16000), dtype=np.float32)

@@ -46,8 +46,8 @@ different machine, set backend `ASR_BASE_URL` to
 
 Every endpoint requires Bearer authentication. The API retains the existing
 health, upload, status, result, TXT, and SRT routes. It accepts mono/stereo,
-keeps the full timeline, disables VAD, and transcribes stereo channels
-sequentially. Results include channel metadata and native signal-quality
+uses Silero VAD while retaining original-timeline timestamps, and transcribes
+stereo channels sequentially. Results include channel metadata and native signal-quality
 flags, but the AI does not assign speaker identities or roles. Noise/music
 may still yield nonempty text; the backend should use manual review whenever
 channel or transcript quality is uncertain.

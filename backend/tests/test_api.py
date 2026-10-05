@@ -18,6 +18,7 @@ from app.db.init_db import initialize_database
 from app.models.asr_job import AsrJob
 from app.models.call_record import CallRecord
 from app.models.notification import CallNotification
+from app.models.violation import Violation
 from app.models.vocabulary import Vocabulary
 from app.services.analytics_service import AnalyticsService
 from app.core.security import create_access_token, decode_access_token
@@ -118,6 +119,59 @@ def test_failed_asr_upload_is_saved_without_a_score():
     assert exported.status_code == 200
     sheet = load_workbook(BytesIO(exported.content), read_only=True).active
     assert any(row[0] == record_id and row[6] == "Chưa chấm điểm" for row in sheet.iter_rows(min_row=2, values_only=True))
+
+
+def test_mediafile_result_marks_only_stored_non_missing_timestamps_as_available():
+    with SessionLocal() as db:
+        record = CallRecord(
+            file_path="timestamp-metadata.wav",
+            transcript="Synthetic transcript for timestamp metadata coverage.",
+            compliance_score=0.0,
+        )
+        db.add(record)
+        db.flush()
+        db.add_all([
+            Violation(
+                call_record_id=record.id,
+                violation_type="negative_attitude",
+                timestamp=None,
+            ),
+            Violation(
+                call_record_id=record.id,
+                violation_type="sensitive_keyword",
+                timestamp=0.0,
+                deduction=0.0,
+            ),
+            Violation(
+                call_record_id=record.id,
+                violation_type="forced_selling",
+                timestamp=2.5,
+            ),
+            Violation(
+                call_record_id=record.id,
+                violation_type="missing_greeting",
+                timestamp=0.0,
+            ),
+        ])
+        db.commit()
+        call_id = record.id
+
+    response = client.get(f"/api/mediafile/{call_id}/result", headers=admin_headers())
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["complianceScore"] == 0.0
+    regions = {item["categoryName"]: item for item in result["keywordsSearchResult"]["regions"]}
+    assert regions["negative_attitude"]["hasTimestamp"] is False
+    assert regions["negative_attitude"]["startTime"] == 0.0
+    assert regions["sensitive_keyword"]["hasTimestamp"] is True
+    assert regions["sensitive_keyword"]["startTime"] == 0.0
+    assert regions["sensitive_keyword"]["endTime"] == 2.0
+    assert regions["sensitive_keyword"]["deduction"] == 0.0
+    assert regions["forced_selling"]["hasTimestamp"] is True
+    assert regions["forced_selling"]["startTime"] == 2.5
+    assert regions["forced_selling"]["endTime"] == 4.5
+    assert regions["missing_greeting"]["hasTimestamp"] is False
 
 
 def test_user_crud():
