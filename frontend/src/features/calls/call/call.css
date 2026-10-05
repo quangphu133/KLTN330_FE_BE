@@ -1,4 +1,13 @@
 #waveform ::part(canvases) {
   position: relative;
-  z-index: 6;
+  z-index: 0;
+}
+
+#waveform ::part(region-handle) {
+  width: 10px !important;
+  touch-action: none;
+}
+
+#waveform ::part(region) {
+  touch-action: none;
 }

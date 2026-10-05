@@ -36,6 +36,7 @@ import { appRoutes } from '@/shared/constants/routes';
 import { LoaderContent } from '@/shared/ui/loader';
 import { toast } from 'react-toastify';
 import type { SttRegion } from '@/entities/mediafile/api/mediafile.types';
+import { getAudioSelection, hasWordSelection, type WordSelection } from './audio-selection';
 
 enum CallTab {
   Transcript = 'transcript',
@@ -60,10 +61,10 @@ type AudioIndicator = {
   }[];
 };
 
-type RoleDraftRegion = {
+type RoleDraftRegion = WordSelection & {
   id: string;
-  startWordId: number;
-  endWordId: number;
+  startTime?: number;
+  endTime?: number;
   role: 'agent' | 'customer' | null;
 };
 
@@ -147,16 +148,20 @@ export const Call = () => {
   const isMonoWordEditor = isAdmin && !hasMultipleChannels && hasWordIds &&
     (needsAdminRoleConfirmation || isConfirmedMonoRoleMap);
   const showAdminRolePanel = isAdmin && (needsAdminRoleConfirmation || canAdminCorrectStereo || isMonoWordEditor);
+  const wordDraftRegions = draftRegions.filter(hasWordSelection);
+  const selectedDraftRegion = draftRegions.find((range) => range.id === selectedDraftRegionId);
+  const canAssignSelectedRegion = Boolean(selectedDraftRegion && hasWordSelection(selectedDraftRegion));
   const roleDraftIsComplete = timedWords.length > 0 &&
     draftRegions.length > 0 &&
-    draftRegions.every((range) => range.startWordId <= range.endWordId &&
+    wordDraftRegions.length === draftRegions.length &&
+    wordDraftRegions.every((range) => range.startWordId <= range.endWordId &&
       timedWords.some((word) => word.wordId === range.startWordId) &&
       timedWords.some((word) => word.wordId === range.endWordId)) &&
-    draftRegions.every((range, index) => draftRegions.every((other, otherIndex) =>
+    wordDraftRegions.every((range, index) => wordDraftRegions.every((other, otherIndex) =>
       index === otherIndex || range.endWordId < other.startWordId || other.endWordId < range.startWordId,
     )) &&
     draftRegions.every((range) => range.role !== null) &&
-    timedWords.every((word) => draftRegions.filter((range) =>
+    timedWords.every((word) => wordDraftRegions.filter((range) =>
       word.wordId >= range.startWordId && word.wordId <= range.endWordId,
     ).length === 1) &&
     draftRegions.some((range) => range.role === 'agent');
@@ -205,13 +210,13 @@ export const Call = () => {
 
   const handleConfirmWordRoles = async () => {
     const orderedWords = [...timedWords].sort((left, right) => left.wordId - right.wordId);
-    const assigned = orderedWords.map((word) => draftRegions.filter((range) =>
+    const assigned = orderedWords.map((word) => wordDraftRegions.filter((range) =>
       word.wordId >= range.startWordId && word.wordId <= range.endWordId,
     ));
-    const rangesAreValid = draftRegions.every((range) => range.startWordId <= range.endWordId &&
+    const rangesAreValid = wordDraftRegions.length === draftRegions.length && wordDraftRegions.every((range) => range.startWordId <= range.endWordId &&
       orderedWords.some((word) => word.wordId === range.startWordId) &&
       orderedWords.some((word) => word.wordId === range.endWordId));
-    const rangesOverlap = draftRegions.some((range, index) => draftRegions.some((other, otherIndex) =>
+    const rangesOverlap = wordDraftRegions.some((range, index) => wordDraftRegions.some((other, otherIndex) =>
       index !== otherIndex && range.startWordId <= other.endWordId && other.startWordId <= range.endWordId,
     ));
     if (!rangesAreValid || rangesOverlap || draftRegions.some((range) => !range.role) || assigned.some((ranges) => ranges.length !== 1) ||
@@ -221,7 +226,7 @@ export const Call = () => {
     }
 
     const assignments: { startWordId: number; endWordId: number; role: 'agent' | 'customer' }[] = [];
-    for (const range of [...draftRegions].sort((left, right) => left.startWordId - right.startWordId)) {
+    for (const range of [...wordDraftRegions].sort((left, right) => left.startWordId - right.startWordId)) {
       if (!range.role) continue;
       const previous = assignments[assignments.length - 1];
       if (previous && previous.role === range.role && previous.endWordId + 1 === range.startWordId) {
@@ -496,31 +501,21 @@ export const Call = () => {
     setRegionsReadyVersion((version) => version + 1);
   }, [audioIndicators]);
 
-  const snapDraftRegion = useCallback((region: any) => {
-    const words = timedWordsRef.current;
-    if (!words.length) return;
-    const startTime = Math.min(region.start, region.end);
-    const endTime = Math.max(region.start, region.end);
-    const startIndex = words.reduce((best, word, index) =>
-      Math.abs(word.startTime - startTime) < Math.abs(words[best].startTime - startTime) ? index : best, 0);
-    const endIndex = words.reduce((best, word, index) =>
-      Math.abs(word.endTime - endTime) < Math.abs(words[best].endTime - endTime) ? index : best, 0);
-    const first = words[Math.min(startIndex, endIndex)];
-    const last = words[Math.max(startIndex, endIndex)];
-    region.setOptions({ start: first.startTime, end: last.endTime, channelIdx: 0 });
+  const updateDraftRegion = useCallback((region: any) => {
+    const selection = getAudioSelection(timedWordsRef.current, region.start, region.end);
     roleDraftDirtyRef.current = true;
     setRoleDraftError(null);
+    setSelectedDraftRegionId(region.id);
     setDraftRegions((previous) => {
       const current = previous.find((range) => range.id === region.id);
       return [
         ...previous.filter((range) => range.id !== region.id),
         {
           id: region.id,
-          startWordId: first.wordId,
-          endWordId: last.wordId,
+          ...selection,
           role: current?.role ?? null,
         },
-      ].sort((left, right) => left.startWordId - right.startWordId);
+      ].sort((left, right) => (left.startTime ?? 0) - (right.startTime ?? 0));
     });
   }, []);
 
@@ -533,10 +528,13 @@ export const Call = () => {
       roleRegionIdsRef.current.add(region.id);
       region.setOptions({ color: 'rgba(147, 51, 234, 0.28)', channelIdx: 0 });
       setSelectedDraftRegionId(region.id);
-      snapDraftRegion(region);
-      region.on('update', () => { roleDraftDirtyRef.current = true; });
-      region.on('update-end', () => snapDraftRegion(region));
-      region.on('click', () => setSelectedDraftRegionId(region.id));
+      updateDraftRegion(region);
+      region.on('update', () => updateDraftRegion(region));
+      region.on('update-end', () => updateDraftRegion(region));
+      region.on('click', (event: MouseEvent) => {
+        event.stopPropagation();
+        setSelectedDraftRegionId(region.id);
+      });
     });
     const disableDragSelection = plugin.enableDragSelection({
       color: 'rgba(147, 51, 234, 0.28)',
@@ -548,7 +546,7 @@ export const Call = () => {
       disableDragSelection();
       unsubscribe();
     };
-  }, [isMonoWordEditor, regionsReadyVersion, snapDraftRegion, wavesurferReady]);
+  }, [isMonoWordEditor, regionsReadyVersion, updateDraftRegion, wavesurferReady]);
 
   useEffect(() => {
     const plugin = regionsPluginRef.current;
@@ -567,7 +565,9 @@ export const Call = () => {
     for (const range of draftRegions) {
       const firstWord = timedWords.find((word) => word.wordId === range.startWordId);
       const lastWord = timedWords.find((word) => word.wordId === range.endWordId);
-      if (!firstWord || !lastWord) continue;
+      const start = range.startTime ?? firstWord?.startTime;
+      const end = range.endTime ?? lastWord?.endTime;
+      if (start === undefined || end === undefined) continue;
 
       const color = range.role === 'agent'
         ? 'rgba(126, 34, 206, 0.42)'
@@ -578,24 +578,27 @@ export const Call = () => {
       if (!region) {
         region = plugin.addRegion({
           id: range.id,
-          start: firstWord.startTime,
-          end: lastWord.endTime,
+          start,
+          end,
           color,
           drag: true,
           resize: true,
           channelIdx: 0,
         });
         roleRegionIdsRef.current.add(region.id);
-        region.on('update', () => { roleDraftDirtyRef.current = true; });
-        region.on('update-end', () => snapDraftRegion(region));
-        region.on('click', () => setSelectedDraftRegionId(region.id));
+        region.on('update', () => updateDraftRegion(region));
+        region.on('update-end', () => updateDraftRegion(region));
+        region.on('click', (event: MouseEvent) => {
+          event.stopPropagation();
+          setSelectedDraftRegionId(region.id);
+        });
       } else {
         if (!roleDraftDirtyRef.current) {
-          region.setOptions({ start: firstWord.startTime, end: lastWord.endTime, color, channelIdx: 0 });
+          region.setOptions({ start, end, color });
         }
       }
     }
-  }, [draftRegions, isMonoWordEditor, regionsReadyVersion, snapDraftRegion, timedWords, wavesurferReady]);
+  }, [draftRegions, isMonoWordEditor, regionsReadyVersion, updateDraftRegion, timedWords, wavesurferReady]);
 
   useEffect(() => {
     if (!containerRef.current || !mediaFileId) return;
@@ -626,8 +629,6 @@ export const Call = () => {
     regionsPluginRef.current = wavesurfer.registerPlugin(
       RegionsPlugin.create()
     );
-
-    regionsPluginRef.current.regionsContainer.style.position = 'static';
 
     if (isDemoMode) {
       // Generate a synthetic speech-like WAV for demo purposes
@@ -1017,20 +1018,30 @@ export const Call = () => {
               </div>
               {isMonoWordEditor ? (
                 <div className="space-y-3 rounded-lg border border-purple-200 bg-white p-3 dark:border-purple-900 dark:bg-gray-950">
-                  <p className="text-sm text-gray-700 dark:text-gray-300">Kéo hoặc kéo mép vùng trên sóng âm để chọn từ; vùng sẽ khớp ranh giới từ. Sau đó gán vai trò cho từng vùng.</p>
+                  <p className="text-sm text-gray-700 dark:text-gray-300">Kéo trên sóng âm để tạo vùng, kéo bên trong để di chuyển hoặc kéo hai mép để chỉnh độ dài. Vùng giữ đúng vị trí bạn chọn; vai trò áp dụng cho các từ nằm trong vùng.</p>
                   {selectedDraftRegionId && (() => {
                     const selected = draftRegions.find((range) => range.id === selectedDraftRegionId);
-                    const text = selected ? timedWords.filter((word) => word.wordId >= selected.startWordId && word.wordId <= selected.endWordId).map((word) => word.text).join(' ') : '';
-                    return selected ? <div className="text-sm"><span className="font-medium">Đang chọn:</span> {text || 'Vùng đã chọn'}</div> : null;
+                    const words = selected && hasWordSelection(selected) ? timedWords.filter((word) => word.wordId >= selected.startWordId && word.wordId <= selected.endWordId) : [];
+                    const text = words.map((word) => word.text).join(' ');
+                    const start = selected?.startTime ?? words[0]?.startTime;
+                    const end = selected?.endTime ?? words[words.length - 1]?.endTime;
+                    return selected ? <div className="space-y-1 text-sm">
+                      {start !== undefined && end !== undefined && <p className="font-medium">Vùng chọn: {start.toFixed(2)} – {end.toFixed(2)} giây</p>}
+                      <p><span className="font-medium">Đang chọn:</span> {text || 'Vùng này không có từ trong phiên âm. Bạn có thể nghe lại hoặc chỉnh hai mép vùng.'}</p>
+                    </div> : null;
                   })()}
                   <div className="flex flex-wrap gap-2">
                     <button type="button" disabled={!selectedDraftRegionId} onClick={() => {
+                      const region = regionsPluginRef.current?.getRegions().find((item: any) => item.id === selectedDraftRegionId);
+                      region?.play(true);
+                    }} className="rounded-lg border border-purple-300 px-3 py-2 text-sm font-medium text-purple-800 dark:border-purple-700 dark:text-purple-200 disabled:opacity-50">Nghe vùng đã chọn</button>
+                    <button type="button" disabled={!canAssignSelectedRegion} onClick={() => {
                       const region = regionsPluginRef.current?.getRegions().find((item: any) => item.id === selectedDraftRegionId);
                       region?.setOptions({ color: 'rgba(126, 34, 206, 0.42)' });
                       roleDraftDirtyRef.current = true;
                       setDraftRegions((previous) => previous.map((range) => range.id === selectedDraftRegionId ? { ...range, role: 'agent' } : range));
                     }} className="rounded-lg bg-purple-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">Nhân viên</button>
-                    <button type="button" disabled={!selectedDraftRegionId} onClick={() => {
+                    <button type="button" disabled={!canAssignSelectedRegion} onClick={() => {
                       const region = regionsPluginRef.current?.getRegions().find((item: any) => item.id === selectedDraftRegionId);
                       region?.setOptions({ color: 'rgba(37, 99, 235, 0.35)' });
                       roleDraftDirtyRef.current = true;
@@ -1045,7 +1056,7 @@ export const Call = () => {
                   </div>
                   {draftRegions.map((range) => (
                     <button key={range.id} type="button" onClick={() => setSelectedDraftRegionId(range.id)} className={`mr-2 rounded-full px-3 py-1 text-xs ${range.role === 'agent' ? 'bg-purple-100 text-purple-900 dark:bg-purple-900/60 dark:text-purple-100' : range.role === 'customer' ? 'bg-blue-100 text-blue-900 dark:bg-blue-900/60 dark:text-blue-100' : 'bg-amber-100 text-amber-900 dark:bg-amber-900/50 dark:text-amber-100'}`}>
-                      {range.role === 'agent' ? 'Nhân viên' : range.role === 'customer' ? 'Khách hàng' : 'Chưa gán'} · {timedWords.filter((word) => word.wordId >= range.startWordId && word.wordId <= range.endWordId).map((word) => word.text).join(' ').slice(0, 80)}
+                      {range.role === 'agent' ? 'Nhân viên' : range.role === 'customer' ? 'Khách hàng' : 'Chưa gán'} · {hasWordSelection(range) ? timedWords.filter((word) => word.wordId >= range.startWordId && word.wordId <= range.endWordId).map((word) => word.text).join(' ').slice(0, 80) : 'Không có từ'}
                     </button>
                   ))}
                   {!roleDraftIsComplete && <p className="text-sm text-amber-800 dark:text-amber-200">Cần phủ đủ mọi từ, không chồng lấn và có ít nhất một từ của nhân viên.</p>}
