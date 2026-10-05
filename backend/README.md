@@ -1,5 +1,9 @@
 # Business backend
 
+An anonymized PostgreSQL schema and metrics snapshot is documented in
+[`database/README.md`](database/README.md). Restore it only into the dedicated
+empty database described there.
+
 FastAPI nghiệp vụ chạy ở cổng `8001`. Backend quản lý người dùng, nhân viên,
 project, checklist, từ điển, cuộc gọi, thống kê và điều phối job BuzzASR.
 
