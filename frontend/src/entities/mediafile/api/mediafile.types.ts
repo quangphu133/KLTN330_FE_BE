@@ -190,10 +190,19 @@ export interface DiarizationResult {
 
 export interface SpeakerRoleMapping {
   status: string;
+  source?: 'regex' | 'manual' | 'default_config' | string;
+  agent_speaker_id?: string | null;
   suggested_agent_speaker_id?: string | null;
   suggestion_reason?: string | null;
-  agent_speaker_id?: string | null;
   customer_speaker_id?: string | null;
+  agent_channel?: number | null;
+  default_agent_channel?: number | null;
+  reason?: string | null;
+  evidence?: { channel?: number | null; sentence?: string | null } | null;
+  assignments?:
+    | { start_word_id: number; end_word_id: number; role: 'agent' | 'customer' }[]
+    | Record<string, 'agent' | 'customer' | 'unknown'>
+    | null;
 }
 
 export interface GptChecklist {
@@ -216,6 +225,7 @@ export interface Stt {
 }
 
 export interface SttChunk {
+  id?: number | string;
   channel: number;
   startChar: number;
   endChar: number;
@@ -228,6 +238,8 @@ export interface SttChunk {
 }
 
 export interface SttRegion {
+  wordId?: number;
+  word_id?: number;
   channel: number;
   startChar: number;
   endChar: number;
@@ -274,7 +286,12 @@ export interface HotwordsSearchResult {
 export interface KeywordRegion {
   category: number;
   categoryName: string | null;
+  displayName?: string;
   phrase: string | null;
+  snippet?: string | null;
+  severity?: string | null;
+  deduction?: number | null;
+  hasTimestamp?: boolean;
   startChar: number;
   endChar: number;
   startTime: number;

@@ -8,6 +8,7 @@ class ViolationBase(BaseModel):
     snippet: Optional[str] = None
     timestamp: Optional[float] = 0.0
     severity: str = "medium"
+    deduction: Optional[float] = None
 
 class ViolationCreate(ViolationBase):
     call_record_id: int

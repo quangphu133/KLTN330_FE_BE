@@ -1,22 +1,56 @@
-# BuzzASR API
+# Whisper large-v3 API
 
-Thư mục này chỉ chứa mã API tích hợp backend với [BuzzASR](https://github.com/lemn-lab/buzz-asr), mô hình AI có sẵn mà nhóm sử dụng. **Không có model/trọng số BuzzASR trong thư mục `api/`.** Người dùng tự tải model theo hướng dẫn của BuzzASR, chuẩn bị định dạng CTranslate2 phù hợp và đặt `BUZZASR_MODEL_DIR` tới đường dẫn tuyệt đối của thư mục model đã chuẩn bị. Cài các thư viện dưới đây không tự tải model.
+This directory contains the standalone authenticated API distribution. It
+does not include model weights. The service supports only
+`Systran/faster-whisper-large-v3` at revision
+`edaa852ec7e145841d8ffdb056a99866b5f0a478`.
 
-Database PostgreSQL nghiệp vụ được cấu hình và truy cập qua `backend/`, không đi kèm thư mục này. Người dùng tự cài PostgreSQL và khởi tạo database theo [README chính](../README.md). Kho SQLite lưu job do API tạo lúc chạy không thay thế database nghiệp vụ.
-
-Dịch vụ này chạy độc lập trên máy có GPU và mặc định lắng nghe ở cổng `8000`.
-
-Bạn tự đặt tên và vị trí thư mục AI/model trên máy của mình. `api/` là tên thư mục mã nguồn trong repo này; model có thể nằm ở một thư mục riêng với tên bất kỳ, được khai báo bằng `BUZZASR_MODEL_DIR`.
+Download the public checkpoint on the AI computer (no Hugging Face token is
+required):
 
 ```powershell
-cd api
-python -m pip install -r requirements.txt
-$env:ASR_API_KEY = "your-shared-secret"
-$env:ASR_HOST = "0.0.0.0"
-$env:BUZZASR_MODEL_DIR = Read-Host 'Enter the absolute path to your CTranslate2 model folder'
-python run.py
+hf download Systran/faster-whisper-large-v3 `
+  --revision edaa852ec7e145841d8ffdb056a99866b5f0a478 `
+  --local-dir models\large-v3
 ```
 
-Backend nghiệp vụ gọi các endpoint `/jobs`, `/jobs/{job_id}` và
-`/jobs/{job_id}/result` bằng Bearer token. Xem thêm
-`buzzasr_bundle/README_API.md`.
+Create a dedicated environment and install the locked dependencies:
+
+```powershell
+py -3.11 -m venv .venv-asr-local
+.\.venv-asr-local\Scripts\python.exe -m pip install -r .\api\requirements.txt
+```
+
+Run the standalone API from `api/`. Enter the absolute model directory and
+this AI machine's Tailscale IPv4 address. The key is prompted securely and
+kept in this PowerShell process environment:
+
+```powershell
+Set-Location .\api
+$secret = Read-Host 'Enter the existing shared ASR key' -AsSecureString
+$env:ASR_API_KEY = [System.Net.NetworkCredential]::new('', $secret).Password
+Remove-Variable secret
+$env:ASR_MODEL_DIR = Read-Host 'Enter the absolute large-v3 checkpoint path'
+if (-not [System.IO.Path]::IsPathRooted($env:ASR_MODEL_DIR)) { throw 'ASR_MODEL_DIR must be an absolute path.' }
+if (-not (Test-Path -LiteralPath $env:ASR_MODEL_DIR -PathType Container)) { throw 'The model checkpoint directory was not found.' }
+$env:ASR_HOST = Read-Host 'Enter this AI machine Tailscale IPv4 (tailscale ip -4)'
+$env:ASR_PORT = '8000'
+$env:ASR_DATA_DIR = Join-Path $env:LOCALAPPDATA 'KLTN330\asr_service_data'
+..\.venv-asr-local\Scripts\python.exe -m whisper_bundle.package.api_server
+```
+
+Keep the same `ASR_DATA_DIR` between restarts to retain job history. For an
+existing installation, keep its current data directory. For a laptop on a
+different machine, set backend `ASR_BASE_URL` to
+`http://<AI_TAILSCALE_IP>:8000`; do not add `/health` or a trailing slash.
+
+Every endpoint requires Bearer authentication. The API retains the existing
+health, upload, status, result, TXT, and SRT routes. It accepts mono/stereo,
+keeps the full timeline, disables VAD, and transcribes stereo channels
+sequentially. Results include channel metadata and native signal-quality
+flags, but the AI does not assign speaker identities or roles. Noise/music
+may still yield nonempty text; the backend should use manual review whenever
+channel or transcript quality is uncertain.
+
+See [the API contract](whisper_bundle/README_API.md) and
+[the backend integration guide](whisper_bundle/package/README_BACKEND.md).

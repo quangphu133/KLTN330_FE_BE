@@ -481,12 +481,7 @@ def test_successful_upload_creates_one_processing_notification_for_uploader():
     assert response.status_code == 202
     notifications = client.get("/api/notifications/", headers=uploader_headers).json()
     upload_notifications = [item for item in notifications if item["job_id"] == job_id]
-    assert len(upload_notifications) == 1
-    notification = upload_notifications[0]
-    assert notification["job_status"] == "queued"
-    assert notification["event_type"] == "processing"
-    assert notification["title"] == "Đang xử lý: follow-up-call.wav"
-    assert notification["message"] == "Bản ghi đã tải lên đang được xử lý và sẽ sớm khả dụng."
+    assert upload_notifications == []
 
 
 def test_processing_upload_notification_changes_to_failure_without_duplicates():
@@ -579,14 +574,11 @@ def test_upload_notification_updates_once_and_notifies_assigned_employee():
         item for item in client.get("/api/notifications/", headers=employee_headers).json()
         if item["job_id"] == job_id
     ]
-    assert len(uploader_notifications) == 1
-    assert uploader_notifications[0]["id"] == notification_id
-    assert uploader_notifications[0]["event_type"] == "needs_confirmation"
-    assert uploader_notifications[0]["job_status"] == "completed"
-    assert uploader_notifications[0]["call_record_id"] is not None
-    assert "xác nhận giọng nhân viên" in uploader_notifications[0]["message"]
-    assert len(employee_notifications) == 1
-    assert employee_notifications[0]["event_type"] == "needs_confirmation"
+    assert uploader_notifications == []
+    assert employee_notifications == []
+    with SessionLocal() as db:
+        stored = db.query(CallNotification).filter(CallNotification.id == notification_id).one()
+        assert stored.event_type == "needs_confirmation"
 
     with SessionLocal() as db:
         from app.services.asr_service import _set_status
@@ -600,11 +592,11 @@ def test_upload_notification_updates_once_and_notifies_assigned_employee():
     assert len([
         item for item in client.get("/api/notifications/", headers=uploader_headers).json()
         if item["job_id"] == job_id
-    ]) == 1
+    ]) == 0
     assert len([
         item for item in client.get("/api/notifications/", headers=employee_headers).json()
         if item["job_id"] == job_id
-    ]) == 1
+    ]) == 0
 
     same_user_job_id = f"upload-same-user-{time.time_ns()}"
     with SessionLocal() as db:
@@ -651,8 +643,110 @@ def test_upload_notification_updates_once_and_notifies_assigned_employee():
         item for item in client.get("/api/notifications/", headers=employee_headers).json()
         if item["job_id"] == same_user_job_id
     ]
-    assert len(same_user_notifications) == 1
-    assert same_user_notifications[0]["event_type"] == "needs_confirmation"
+    assert same_user_notifications == []
+
+
+def test_admin_speaker_confirmation_scores_once_and_notifies_employee_with_violation_deductions():
+    employee_id, employee_headers = create_telesale(f"speaker-confirm-{time.time_ns()}@example.com")
+    admin = admin_headers()
+    job_id = f"speaker-confirm-job-{time.time_ns()}"
+    with SessionLocal() as db:
+        record = CallRecord(
+            telesale_id=employee_id,
+            file_path="speaker-confirm.wav",
+            transcript="Dạ em chào anh, nội dung có lừa đảo.",
+            analysis_data={
+                "diarization": {
+                    "status": "completed",
+                    "speakers": [{"speaker_id": "speaker_0"}, {"speaker_id": "speaker_1"}],
+                    "utterances": [
+                        {"speaker_id": "speaker_0", "start": 1.25, "end": 2.5, "text": "Dạ em chào anh, nội dung có lừa đảo."},
+                        {"speaker_id": "speaker_1", "start": 2.5, "end": 3.0, "text": "Vâng."},
+                    ],
+                    "role_mapping": {},
+                }
+            },
+        )
+        db.add(record)
+        db.flush()
+        job = AsrJob(job_id=job_id, file_path=record.file_path, status="completed", telesale_id=employee_id, call_record_id=record.id)
+        db.add(job)
+        db.flush()
+        from app.services.notification_service import create_upload_notification
+
+        create_upload_notification(db, user_id=employee_id, job_id=job_id, asr_job_id=job.id, filename="speaker-confirm.wav", event_type="needs_confirmation", title="Cần xác nhận người nói")
+        db.commit()
+        call_id = record.id
+
+    forbidden = client.put(
+        f"/api/mediafile/{call_id}/speaker-roles",
+        json={"agentSpeakerId": "speaker_0"},
+        headers=employee_headers,
+    )
+    assert forbidden.status_code == 403
+
+    confirmed = client.put(
+        f"/api/mediafile/{call_id}/speaker-roles",
+        json={"agentSpeakerId": "speaker_0"},
+        headers=admin,
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["complianceScore"] == 70.0
+    violations = confirmed.json()["keywordsSearchResult"]["regions"]
+    deductions = {item["categoryName"]: item["deduction"] for item in violations}
+    assert deductions == {"missing_closing": 10.0, "sensitive_keyword": 20.0}
+    assert all(item["displayName"] and item["snippet"] for item in violations)
+    assert next(item for item in violations if item["categoryName"] == "missing_closing")["hasTimestamp"] is False
+
+    notifications = [
+        item for item in client.get("/api/notifications/", headers=employee_headers).json()
+        if item["job_id"] == job_id
+    ]
+    assert len(notifications) == 1
+    assert notifications[0]["event_type"] == "completed"
+    assert "70/100" in notifications[0]["message"]
+
+    with SessionLocal() as db:
+        record = db.query(CallRecord).filter(CallRecord.id == call_id).one()
+        record.compliance_score = 75.5
+        db.commit()
+        from app.services.notification_service import notify_call_scored
+
+        notify_call_scored(db, record)
+    decimal_notifications = [
+        item for item in client.get("/api/notifications/", headers=employee_headers).json()
+        if item["job_id"] == job_id
+    ]
+    assert len(decimal_notifications) == 1
+    assert "75.5/100" in decimal_notifications[0]["message"]
+
+    with SessionLocal() as db:
+        record = db.query(CallRecord).filter(CallRecord.id == call_id).one()
+        record.compliance_score = 0
+        db.commit()
+        notify_call_scored(db, record)
+    zero_notifications = [
+        item for item in client.get("/api/notifications/", headers=employee_headers).json()
+        if item["job_id"] == job_id
+    ]
+    assert len(zero_notifications) == 1
+    assert "0/100" in zero_notifications[0]["message"]
+
+
+def test_employee_legacy_call_api_cannot_assign_agent_speaker():
+    _, employee_headers = create_telesale(f"legacy-speaker-{time.time_ns()}@example.com")
+    response = client.post(
+        "/api/calls/",
+        json={
+            "file_path": "not-needed.wav",
+            "ai_result": {
+                "transcript": "Hello",
+                "segments": [{"speaker": "agent", "text": "Hello"}],
+            },
+        },
+        headers=employee_headers,
+    )
+    assert response.status_code == 403
 
 
 def test_admin_deletion_requires_reason_and_notifies_assigned_employee():

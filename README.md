@@ -4,7 +4,7 @@ Mã nguồn web và backend phục vụ khóa luận: tải bản ghi cuộc g�
 
 - **Web và backend:** [quangphu133/KLTN330_FE_BE](https://github.com/quangphu133/KLTN330_FE_BE).
 - **Android App dành cho nhân viên:** [quangphu133/KNTN330_DT](https://github.com/quangphu133/KNTN330_DT). Đây là repository riêng, không nằm trong thư mục `frontend/`.
-- **Nguồn AI:** [BuzzASR — lemn-lab/buzz-asr](https://github.com/lemn-lab/buzz-asr). Nhóm sử dụng mô hình có sẵn từ BuzzASR để tích hợp vào hệ thống. Người dùng tự tải model và thiết lập môi trường theo hướng dẫn của BuzzASR trước khi sử dụng.
+- **Model AI:** [Whisper large-v3 trên Faster-Whisper](https://huggingface.co/Systran/faster-whisper-large-v3), dùng [thư viện Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) và revision cố định `edaa852ec7e145841d8ffdb056a99866b5f0a478`. Model được tải riêng, không nằm trong repo.
 
 ## 1. Cấu trúc và luồng kết nối
 
@@ -12,29 +12,29 @@ Mã nguồn web và backend phục vụ khóa luận: tải bản ghi cuộc g�
 | --- | --- | --- | --- |
 | Web Next.js | `frontend/` | Quản lý và xem kết quả cuộc gọi | `3000` |
 | Backend FastAPI | `backend/` | Tài khoản, dữ liệu nghiệp vụ, lưu audio, điều phối AI | `8001` |
-| API tích hợp BuzzASR | `api/` | Nhận yêu cầu từ backend và gọi model BuzzASR đã được tải, cấu hình riêng; không chứa model | `8000` |
+| Whisper ASR API | `api/` | Nhận yêu cầu từ backend và chạy Whisper large-v3 đã được tải riêng; không chứa model | `8000` |
 | PostgreSQL | Dịch vụ cài riêng | Lưu dữ liệu nghiệp vụ | `5432` mặc định |
 
 ```text
-Web / App -> Backend :8001 -> BuzzASR API :8000
+Web / App -> Backend :8001 -> Whisper ASR API :8000
                   |
              PostgreSQL
 ```
 
-**Repository chỉ cung cấp mã nguồn tích hợp.** Thư mục `api/` chứa mã API kết nối backend với BuzzASR, không chứa model/trọng số BuzzASR. Mọi người cần tự tải model từ nguồn BuzzASR và cấu hình đường dẫn để API sử dụng. Clone repo hoặc cài thư viện Python không đồng nghĩa đã có model.
+**Repository chỉ cung cấp mã nguồn tích hợp.** Thư mục `api/` chứa API và client cho Whisper ASR, không chứa checkpoint large-v3. Tải checkpoint công khai theo revision nêu trên và cấu hình `ASR_MODEL_DIR` tới thư mục checkpoint tuyệt đối. Hugging Face token không bắt buộc.
 
 **Database cũng cần tự chuẩn bị:** repo có model dữ liệu ORM và migration SQL trong `backend/`, không kèm bản sao lưu dữ liệu, tài khoản đăng nhập hay dữ liệu cuộc gọi thực tế. Người dùng tự cài PostgreSQL, tạo database và khởi tạo bảng theo phần 3. Việc kết nối database nghiệp vụ do `backend/` thực hiện.
 
 ## 2. Chuẩn bị và lấy mã nguồn
 
-Hướng dẫn dùng Windows và **PowerShell**. Cần Git, Python 3.12, Node.js 20 trở lên với npm, PostgreSQL đang hoạt động và công cụ `psql`/`pg_dump` nếu thao tác database trong terminal. Có thể dùng pgAdmin cho các thao tác SQL tương ứng.
+Hướng dẫn dùng Windows và **PowerShell**. Cần Git, Python 3.11, Node.js 20 trở lên với npm, PostgreSQL đang hoạt động và công cụ `psql`/`pg_dump` nếu thao tác database trong terminal. Có thể dùng pgAdmin cho các thao tác SQL tương ứng.
 
-Máy chỉ chạy web/backend. Máy AI cần model BuzzASR được tải riêng, ở định dạng CTranslate2 mà mã API hiện tại sử dụng, cùng môi trường GPU tương thích.
+Máy chỉ chạy web/backend. Máy AI cần checkpoint CTranslate2 của Whisper large-v3 và môi trường GPU tương thích.
 
 ```powershell
 git clone https://github.com/quangphu133/KLTN330_FE_BE.git
 cd KLTN330_FE_BE
-py -3.12 -m venv .venv-doan
+py -3.11 -m venv .venv-doan
 .\.venv-doan\Scripts\python.exe -m pip install -r .\backend\requirements.lock.txt
 ```
 
@@ -93,6 +93,7 @@ Chỉ tiếp tục khi sao lưu thành công; giữ bản sao ngoài repository.
 - `migrations/002_add_call_analysis_data.sql`: bổ sung cột lưu phiên âm, diarization và vai trò người nói cho bảng `call_records` cũ.
 - `migrations/003_add_call_notifications.sql`: tạo bảng và chỉ mục thông báo cuộc gọi cho web/app.
 - `migrations/004_remove_operators.sql`: bỏ danh mục Operator cũ, dùng tài khoản `users` với `role = 'telesales'` và liên kết `telesale_id`. Dừng upload, chờ các job kết thúc và kiểm tra dữ liệu trước khi chạy; migration tự dừng nếu còn Operator hoặc tham chiếu `operator_id`, không tự đoán tài khoản thay thế.
+- `migrations/005_add_violation_deduction.sql`: bổ sung `violations.deduction` và đồng bộ nội dung thông báo hoàn tất cho các cuộc gọi đã có điểm. Migration này cần thiết cho phiên bản backend hiện tại; `app.db.init_db` không thêm cột vào bảng đã tồn tại.
 
 Chọn migration phù hợp với schema hiện tại; không chạy `001` trên database rỗng:
 
@@ -101,18 +102,26 @@ psql -h 127.0.0.1 -U postgres -d do_an_db -v ON_ERROR_STOP=1 -f .\migrations\001
 psql -h 127.0.0.1 -U postgres -d do_an_db -v ON_ERROR_STOP=1 -f .\migrations\002_add_call_analysis_data.sql
 psql -h 127.0.0.1 -U postgres -d do_an_db -v ON_ERROR_STOP=1 -f .\migrations\003_add_call_notifications.sql
 psql -h 127.0.0.1 -U postgres -d do_an_db -v ON_ERROR_STOP=1 -f .\migrations\004_remove_operators.sql
-..\.venv-doan\Scripts\python.exe -m app.db.init_db
+psql -h 127.0.0.1 -U postgres -d do_an_db -v ON_ERROR_STOP=1 -f .\migrations\005_add_violation_deduction.sql
 ```
 
-Migration `001` và `002` chưa có script rollback đi kèm. Khi cần hoàn tác, phục hồi bản sao lưu vào database riêng, kiểm tra dữ liệu rồi mới đổi `DATABASE_URL`. Migration `004` có script rollback chỉ tạo lại cấu trúc Operator rỗng. Với thông báo, file `003_add_call_notifications_rollback.sql` chỉ hướng dẫn hoàn tác code và giữ nguyên bảng/lịch sử thông báo. Xem thêm [hướng dẫn backend](backend/README.md).
+Chạy các migration phù hợp với schema hiện tại; dòng `005` là migration cần thiết cho backend hiện tại. Các lệnh trên chạy từ thư mục `backend/`. Không dùng `app.db.init_db` như migration cho database đã có dữ liệu: lệnh đó tạo bảng còn thiếu và seed từ điển Regex nhưng không thêm cột cho bảng cũ. Với database mới, xem mục trên; không xóa/reset dữ liệu để xử lý thiếu migration. Migration `001` và `002` chưa có script rollback đi kèm. Khi cần hoàn tác, phục hồi bản sao lưu vào database riêng, kiểm tra dữ liệu rồi mới đổi `DATABASE_URL`. Migration `004` có script rollback chỉ tạo lại cấu trúc Operator rỗng. Migration `005` giữ lại cột deduction khi hoàn tác code vì lịch sử khấu trừ không thể khôi phục. Với thông báo, file `003_add_call_notifications_rollback.sql` chỉ hướng dẫn hoàn tác code và giữ nguyên bảng/lịch sử thông báo. Xem thêm [hướng dẫn backend](backend/README.md).
 
 ## 4. Chạy backend và tạo tài khoản local
 
-Mở terminal ở `KLTN330_FE_BE/backend`:
+Mở PowerShell tại thư mục gốc repo rồi chạy. Nhập IP Tailscale của máy AI và cùng khóa ASR hiện có; khóa chỉ được đặt trong môi trường của tiến trình này, không ghi vào mã nguồn:
 
 ```powershell
-..\.venv-doan\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8001
+Set-Location .\backend
+$aiTailnetIP = Read-Host 'AI machine Tailscale IPv4 (tailscale ip -4)'
+$env:ASR_BASE_URL = "http://$($aiTailnetIP):8000"
+$secret = Read-Host 'Enter the existing shared ASR API key' -AsSecureString
+$env:ASR_API_KEY = [System.Net.NetworkCredential]::new('', $secret).Password
+Remove-Variable secret
+& '..\.venv-doan\Scripts\python.exe' -m uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
+
+`ASR_BASE_URL` chỉ là địa chỉ gốc, không thêm `/health`, `/jobs`, `/api` hoặc dấu `/` cuối. Backend gọi Whisper API bằng `ASR_BASE_URL` và `ASR_API_KEY`. Các biến môi trường của PowerShell hiện tại được ưu tiên hơn giá trị cùng tên trong `backend/.env`.
 
 - Health: <http://127.0.0.1:8001/health>.
 - Swagger: <http://127.0.0.1:8001/docs>.
@@ -167,68 +176,82 @@ npm run dev
 
 Mở <http://localhost:3000/auth/sign-in> và đăng nhập bằng tài khoản đã tạo. Chế độ demo của web có dữ liệu mô phỏng; kiểm thử backend/AI cần dùng tài khoản thật trong database.
 
-## 6. Tự tải BuzzASR và kết nối qua API
+## 6. Whisper large-v3 API trên máy AI
 
-AI phiên âm mà nhóm sử dụng được lấy từ [BuzzASR](https://github.com/lemn-lab/buzz-asr). Mỗi người tự tải model theo tài liệu của dự án nguồn và chuẩn bị model tương thích với định dạng CTranslate2 mà API này yêu cầu. Repository này không phân phối model BuzzASR và không tự tải model khi khởi động.
+Mã API nằm trong `api/whisper_bundle/`; repository không chứa checkpoint. API dùng checkpoint Faster-Whisper large-v3 công khai của Systran tại revision cố định `edaa852ec7e145841d8ffdb056a99866b5f0a478`. Tải checkpoint một lần trên máy AI; token Hugging Face không cần thiết cho model công khai. API chạy bằng các file đã tải trong `ASR_MODEL_DIR`, không tải model từ Hugging Face khi khởi động.
 
-Thư mục `api/` chỉ cung cấp mã dịch vụ API tích hợp với model đã chuẩn bị: nhận audio, gọi xử lý và trả trạng thái/kết quả cho backend. Các lệnh dưới đây cài và chạy lớp API này, không phải lệnh tải model BuzzASR. Phân tách người nói sử dụng pyannote và cần cấu hình riêng như bên dưới.
-
-Bạn tự chọn vị trí và tên thư mục chứa mã API AI/model trên máy của mình; không yêu cầu tên thư mục hoặc ổ đĩa cố định. Nếu đã chạy dịch vụ AI từ thư mục riêng đó, cấu hình `ASR_BASE_URL` và cùng một `ASR_API_KEY` ở hai phía; không mở thêm bản `api/` trên cùng cổng `8000`.
-
-Sau khi tự tải và chuẩn bị model, nếu dùng lớp API trong repo này, làm các bước sau **trên máy AI**, từ thư mục gốc repo:
+Ví dụ tải model về một vị trí ngoài repository:
 
 ```powershell
-py -3.12 -m venv .venv-asr-local
+hf download Systran/faster-whisper-large-v3 `
+  --revision edaa852ec7e145841d8ffdb056a99866b5f0a478 `
+  --local-dir "$env:USERPROFILE\Models\faster-whisper-large-v3"
+```
+
+Nếu chưa có môi trường Python riêng cho AI, tạo môi trường tại gốc repo và cài phụ thuộc của API:
+
+```powershell
+py -3.11 -m venv .venv-asr-local
 .\.venv-asr-local\Scripts\python.exe -m pip install -r .\api\requirements.txt
-py -3.12 -m venv .venv-diarization
-.\.venv-diarization\Scripts\python.exe -m pip install -r .\api\buzzasr_bundle\package\requirements-diarization.txt
 ```
 
-Cài phụ thuộc chưa đủ để chạy model trên mọi máy. Cần chuẩn bị:
-
-- Model BuzzASR do người dùng tự tải và chuẩn bị ở định dạng CTranslate2. `BUZZASR_MODEL_DIR` phải là đường dẫn tuyệt đối đến thư mục model trên máy của người dùng; model không có sẵn trong `api/`.
-- CUDA/cuDNN và driver tương thích với CTranslate2. Bộ phụ thuộc diarization khai báo PyTorch CUDA 12.8.
-- Quyền truy cập model `pyannote/speaker-diarization-community-1` trên Hugging Face và token phù hợp.
-- TorchCodec/FFmpeg hoạt động trong môi trường diarization. Trên Windows, khi cần nạp DLL FFmpeg, đặt `ASR_FFMPEG_BIN` tới thư mục `bin` của bản FFmpeg shared phù hợp.
-
-`requirements-diarization.lock.txt` hiện chứa đường dẫn wheel TorchCodec local của máy phát triển. Dùng file `requirements-diarization.txt` như trên, không dùng nguyên lockfile đó trên máy khác.
-
-Trong cùng terminal PowerShell 7, từ thư mục gốc repo:
+Khởi động API từ gốc repo. Xem IP bằng `tailscale ip -4` trên máy AI rồi nhập địa chỉ đó để API chỉ bind vào giao diện Tailscale:
 
 ```powershell
-$env:ASR_API_KEY = Read-Host 'Enter the shared ASR API key' -MaskInput
-$env:HF_TOKEN = Read-Host 'Enter the Hugging Face token' -MaskInput
-$env:ASR_HOST = '127.0.0.1'
+$aiTailnetIP = Read-Host 'AI machine Tailscale IPv4 (tailscale ip -4)'
+$secret = Read-Host 'Enter the existing shared ASR API key' -AsSecureString
+$env:ASR_API_KEY = [System.Net.NetworkCredential]::new('', $secret).Password
+Remove-Variable secret
+$env:ASR_HOST = $aiTailnetIP
 $env:ASR_PORT = '8000'
-$env:BUZZASR_MODEL_DIR = Read-Host 'Enter the absolute path to your CTranslate2 model folder'
-$env:ASR_DATA_DIR = Join-Path (Get-Location) 'api\asr_service_data'
-$env:ASR_ENABLE_DIARIZATION = 'true'
-$env:ASR_DIARIZATION_PYTHON = (Resolve-Path .\.venv-diarization\Scripts\python.exe).Path
-.\.venv-asr-local\Scripts\python.exe .\api\run.py
+$env:ASR_MODEL_DIR = "$env:USERPROFILE\Models\faster-whisper-large-v3"
+if (-not [System.IO.Path]::IsPathRooted($env:ASR_MODEL_DIR)) { throw 'ASR_MODEL_DIR must be an absolute path.' }
+if (-not (Test-Path -LiteralPath $env:ASR_MODEL_DIR -PathType Container)) { throw 'The model checkpoint directory was not found.' }
+$env:ASR_DATA_DIR = Join-Path $env:LOCALAPPDATA 'KLTN330\asr_service_data'
+Set-Location .\api
+..\.venv-asr-local\Scripts\python.exe -m whisper_bundle.package.api_server
 ```
 
-Khi lệnh hỏi đường dẫn, nhập đường dẫn tuyệt đối tới thư mục model CTranslate2 bạn đã tự tải và chuẩn bị; tên thư mục và ổ đĩa do bạn tự đặt. `ASR_DATA_DIR` trong ví dụ được tạo theo vị trí repo hiện tại, cũng có thể đổi sang thư mục lưu audio/job riêng. Khóa ASR nhập ở đây phải khớp `backend/.env`. `HF_TOKEN` chỉ dùng phía AI, không đặt trong web/Flutter. Bản API trong repo này đọc biến môi trường: chỉ tạo `api/.env` không tự nạp cấu hình, và không nên giả định API sẽ hỏi token khi thiếu.
+Keep the existing `ASR_DATA_DIR` when restarting an installation with saved jobs. Do not add the API key to source, Git, frontend, or Android files. All API endpoints, including health, require Bearer authentication. The API accepts mono/stereo audio, retains the full timeline, disables VAD, and processes stereo channels sequentially. It reports channel-quality flags but does not assign agent/customer identities; role assignment remains in the backend workflow.
 
-Mọi endpoint AI, kể cả health, cần header Bearer. Trong terminal PowerShell 7 khác:
+Kiểm tra API từ PowerShell trên máy laptop. Nhập IP Tailscale của máy AI và cùng khóa dùng trên máy AI:
 
 ```powershell
-$asrKey = Read-Host 'Enter the shared ASR API key' -MaskInput
-Invoke-RestMethod -Uri 'http://127.0.0.1:8000/health' -Headers @{ Authorization = "Bearer $asrKey" }
-Remove-Variable asrKey
+$aiTailnetIP = Read-Host 'AI machine Tailscale IPv4 (tailscale ip -4)'
+tailscale ping $aiTailnetIP
+Test-NetConnection $aiTailnetIP -Port 8000
+$secret = Read-Host 'Enter the existing shared ASR API key' -AsSecureString
+$env:ASR_API_KEY = [System.Net.NetworkCredential]::new('', $secret).Password
+Remove-Variable secret
+$asrBaseUrl = "http://$($aiTailnetIP):8000"
+$headers = @{ Authorization = "Bearer $env:ASR_API_KEY" }
+Invoke-RestMethod -Uri "$asrBaseUrl/health" -Headers $headers
 ```
 
-`ready=true` xác nhận model ASR sẵn sàng; vẫn cần chạy audio đến khi hoàn tất để kiểm tra diarization. Dừng dịch vụ bằng `Ctrl+C` trong terminal tương ứng; đóng terminal AI sau khi dùng để kết thúc phiên chứa token.
+Kết quả cần báo `ready=true`, `model=large-v3`, `device=cuda`, `compute_type=float16`. Nếu `tailscale ping` thành công nhưng TCP 8000 không kết nối được, kiểm tra API đang chạy và firewall trên máy AI. Thông thường Tailscale hoạt động với firewall hiện có; nếu cần luật inbound, chỉ cho TCP 8000 từ IP Tailscale laptop tới IP Tailscale máy AI. [Tailscale CLI](https://tailscale.com/kb/1080/cli) · [Tailscale firewall guidance](https://tailscale.com/kb/1181/firewalls)
+
+Ví dụ tạo luật giới hạn địa chỉ, chỉ chạy trên máy AI trong PowerShell mở bằng quyền Administrator khi đã xác định đúng IP của cả hai máy:
+
+```powershell
+$aiTailnetIP = Read-Host 'AI machine Tailscale IPv4'
+$laptopTailnetIP = Read-Host 'Laptop Tailscale IPv4'
+New-NetFirewallRule -DisplayName 'Whisper API TCP 8000 from laptop Tailscale IP' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress $aiTailnetIP -LocalPort 8000 -RemoteAddress $laptopTailnetIP -Profile Any
+```
+
+Verify readiness and then submit a test file through the existing upload
+flow. `ready=true` alone does not verify transcription; poll the accepted job
+through `completed` and inspect the returned transcript and timestamps.
 
 ## 7. Kiểm thử một cuộc gọi
 
-1. Khởi động PostgreSQL, AI, backend và web; kiểm tra health của hai API.
+1. Khởi động PostgreSQL, AI, backend và web; kiểm tra health của hai API. Với máy cài mới, PostgreSQL và `DATABASE_URL` phải được cấu hình trước; không chạy lệnh khởi tạo/seed trên database đã có dữ liệu.
 2. Đăng nhập tài khoản thật, tải audio qua `POST /api/transcribe/upload` (web hoặc Swagger). WAV, MP3, M4A, OGG, FLAC được cả backend và AI chấp nhận. Backend mặc định giới hạn 50 MB, AI mặc định giới hạn 30 phút.
 3. Theo dõi `GET /api/transcribe/{job_id}/status` tới `completed` hoặc `failed`; đọc `error_message` nếu có.
 4. Dùng `call_record_id` để đọc `GET /api/mediafile/{id}/result` và nghe `GET /api/mediafile/{id}/stream`.
-5. Khi diarization hoàn tất với đúng hai speaker, xác nhận người tư vấn qua `PUT /api/mediafile/{id}/speaker-roles`, ví dụ JSON `{"agentSpeakerId":"SPEAKER_01"}`. Chọn theo nội dung/nghe thực tế, không mặc định speaker đầu tiên là nhân viên.
+5. AI không nhận dạng speaker hoặc vai trò agent/customer. Dùng quy trình xác nhận vai trò hiện có trong backend; không suy ra danh tính từ thứ tự channel. Kiểm tra `channel_quality` và transcript stereo trước khi dùng dữ liệu.
 6. Đọc `roleMapping`, `keywordsSearchResult.regions` và `complianceScore` trong kết quả mediafile; `GET /api/calls/{id}` dùng tên trường `compliance_score`. Điểm chưa có là `null`, không phải 0. Điểm tuân thủ dựa trên Regex trong `backend/app/services/rule_service.py`, không phải điểm cảm xúc hoặc một checklist tùy ý trên giao diện.
 
-Nếu AI ngoại tuyến, backend có thể lưu audio cùng job thất bại; HTTP 202 chỉ cho biết đã tiếp nhận, không chứng minh AI phân tích thành công. Audio một người nói có thể trả `unsupported_speaker_count`, không đủ điều kiện xác nhận hai vai trò.
+Nếu AI ngoại tuyến, backend có thể lưu audio cùng job thất bại; HTTP 202 chỉ cho biết đã tiếp nhận, không chứng minh AI phân tích thành công. Cờ chất lượng không phải bộ phát hiện speech: nhiễu hoặc nhạc vẫn có thể tạo transcript không rỗng. Khi không chắc, backend cần giữ bước kiểm tra/xác nhận thủ công.
 
 ## 8. Kết nối Android app
 

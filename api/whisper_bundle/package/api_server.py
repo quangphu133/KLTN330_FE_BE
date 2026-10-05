@@ -1,4 +1,4 @@
-"""Remote BuzzASR API server for a single CUDA worker."""
+"""Remote Whisper large-v3 API server for a single CUDA worker."""
 
 from __future__ import annotations
 
@@ -18,20 +18,13 @@ import av
 from aiohttp import web
 
 try:
-    from .asr import transcribe_audio, warm_up_model
+    from .asr import MODEL_ALIASES, transcribe_audio, warm_up_model
 except ImportError:  # Supports direct execution from this package directory.
-    from asr import transcribe_audio, warm_up_model
+    from asr import MODEL_ALIASES, transcribe_audio, warm_up_model
 
 
 STATUSES = {"queued", "running", "completed", "failed"}
 ALLOWED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg"}
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def utc_now() -> datetime:
@@ -56,14 +49,9 @@ class Settings:
     max_audio_seconds: int
     max_pending_jobs: int
     retention_days: int
-    model: str = "buzzasr"
+    model: str = "large-v3"
     device: str = "cuda"
     compute_type: str = "float16"
-    enable_diarization: bool = True
-    diarization_model: str = "pyannote/speaker-diarization-community-1"
-    diarization_token: str = ""
-    diarization_device: str = "cuda"
-    diarization_python: str = ""
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -83,14 +71,6 @@ class Settings:
             max_audio_seconds=int(os.environ.get("ASR_MAX_AUDIO_SECONDS", "1800")),
             max_pending_jobs=int(os.environ.get("ASR_MAX_PENDING_JOBS", "10")),
             retention_days=int(os.environ.get("ASR_RETENTION_DAYS", "7")),
-            enable_diarization=_env_bool("ASR_ENABLE_DIARIZATION", True),
-            diarization_model=os.environ.get(
-                "ASR_DIARIZATION_MODEL",
-                "pyannote/speaker-diarization-community-1",
-            ),
-            diarization_token=os.environ.get("HF_TOKEN", ""),
-            diarization_device=os.environ.get("ASR_DIARIZATION_DEVICE", "cuda"),
-            diarization_python=os.environ.get("ASR_DIARIZATION_PYTHON", ""),
         )
 
 
@@ -269,6 +249,10 @@ def _probe_audio(path: Path, maximum_seconds: int) -> None:
                 raise ValueError(f"Audio duration exceeds {maximum_seconds} seconds")
             if duration is not None and duration <= 0:
                 raise ValueError("Audio has no duration")
+            stream = next((item for item in container.streams if item.type == "audio"), None)
+            channels = 0 if stream is None else int(stream.codec_context.channels or 0)
+            if channels not in {1, 2}:
+                raise ValueError("Audio must contain one or two channels")
     except ValueError:
         raise
     except Exception as error:
@@ -297,17 +281,12 @@ async def _run_job(app: web.Application, job_id: str) -> None:
         result = await asyncio.to_thread(
             transcribe_audio,
             audio_path,
-            model="buzzasr",
+            model=settings.model,
             device="cuda",
             compute_type="float16",
             language="vi",
             beam_size=5,
             output_dir=None,
-            enable_diarization=settings.enable_diarization,
-            diarization_model=settings.diarization_model,
-            diarization_token=settings.diarization_token or None,
-            diarization_device=settings.diarization_device,
-            diarization_python=settings.diarization_python or None,
         )
         safe_result = _safe_result(result, row["original_filename"])
         result_path.write_text(
@@ -385,12 +364,13 @@ async def health(request: web.Request) -> web.Response:
         {
             "ready": bool(request.app[STATE_KEY]["ready"]),
             "model": settings.model,
+            "model_source_revision": MODEL_ALIASES[settings.model]["source_revision"],
             "device": settings.device,
             "compute_type": settings.compute_type,
-            "diarization_enabled": settings.enable_diarization,
-            "diarization_model": settings.diarization_model,
-            "diarization_device": settings.diarization_device,
-            "diarization_python_configured": bool(settings.diarization_python),
+            "diarization_enabled": False,
+            "diarization_model": None,
+            "diarization_device": settings.device,
+            "diarization_python_configured": False,
             "queued_jobs": store.count_pending(),
         }
     )
@@ -475,21 +455,81 @@ async def get_job(request: web.Request) -> web.Response:
     return web.json_response(_job_payload(request, row))
 
 
-async def get_result(request: web.Request) -> web.Response:
+def _load_completed_result(
+    request: web.Request,
+) -> tuple[dict[str, Any] | None, web.Response | None]:
     unauthorized = _require_auth(request)
     if unauthorized:
-        return unauthorized
+        return None, unauthorized
     row = request.app[STORE_KEY].get(request.match_info["job_id"])
     if row is None:
-        return _json_error("not_found", "Job was not found or has expired.", 404)
+        return None, _json_error("not_found", "Job was not found or has expired.", 404)
     if row["status"] != "completed":
         if row["status"] == "failed":
-            return _json_error(str(row["error_code"]), str(row["error_message"]), 409)
-        return _json_error("not_ready", "The job is not completed.", 409)
+            return None, _json_error(
+                str(row["error_code"]), str(row["error_message"]), 409
+            )
+        return None, _json_error("not_ready", "The job is not completed.", 409)
     result_path = Path(row["result_path"])
     if not result_path.is_file():
-        return _json_error("result_missing", "The completed result is unavailable.", 500)
-    return web.json_response(json.loads(result_path.read_text(encoding="utf-8")))
+        return None, _json_error(
+            "result_missing", "The completed result is unavailable.", 500
+        )
+    return json.loads(result_path.read_text(encoding="utf-8")), None
+
+
+async def get_result(request: web.Request) -> web.Response:
+    result, error = _load_completed_result(request)
+    if error:
+        return error
+    return web.json_response(result)
+
+
+def _format_timestamp(seconds: float) -> str:
+    milliseconds = max(0, int(round(float(seconds) * 1000)))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds_part, milliseconds_part = divmod(remainder, 1_000)
+    return f"{hours:02d}:{minutes:02d}:{seconds_part:02d},{milliseconds_part:03d}"
+
+
+async def get_text_result(request: web.Request) -> web.Response:
+    result, error = _load_completed_result(request)
+    if error:
+        return error
+    lines = [
+        f"[{_format_timestamp(segment['start']).replace(',', '.')} -> "
+        f"{_format_timestamp(segment['end']).replace(',', '.')}] {segment['text']}"
+        for segment in result["segments"]
+    ]
+    body = "\n".join(lines)
+    return _text_file_response(request, body, "txt")
+
+
+async def get_srt_result(request: web.Request) -> web.Response:
+    result, error = _load_completed_result(request)
+    if error:
+        return error
+    blocks = [
+        f"{index}\n{_format_timestamp(segment['start'])} --> "
+        f"{_format_timestamp(segment['end'])}\n{segment['text']}"
+        for index, segment in enumerate(result["segments"], start=1)
+    ]
+    body = "\n\n".join(blocks)
+    return _text_file_response(request, body, "srt")
+
+
+def _text_file_response(request: web.Request, body: str, extension: str) -> web.Response:
+    headers = {}
+    if request.query.get("download") == "1":
+        job_id = request.match_info["job_id"]
+        headers["Content-Disposition"] = f'attachment; filename="{job_id}.{extension}"'
+    return web.Response(
+        text=body,
+        content_type="text/plain",
+        charset="utf-8",
+        headers=headers,
+    )
 
 
 def create_app(settings: Settings | None = None) -> web.Application:
@@ -503,6 +543,8 @@ def create_app(settings: Settings | None = None) -> web.Application:
     app.router.add_post("/jobs", create_job, name="create-job")
     app.router.add_get("/jobs/{job_id}", get_job, name="job-status")
     app.router.add_get("/jobs/{job_id}/result", get_result, name="job-result")
+    app.router.add_get("/jobs/{job_id}/txt", get_text_result, name="job-text-result")
+    app.router.add_get("/jobs/{job_id}/srt", get_srt_result, name="job-srt-result")
     app.on_startup.append(_startup)
     app.on_cleanup.append(_cleanup)
     return app
@@ -510,7 +552,7 @@ def create_app(settings: Settings | None = None) -> web.Application:
 
 def main() -> None:
     settings = Settings.from_environment()
-    print(f"Starting BuzzASR API on {settings.host}:{settings.port}")
+    print(f"Starting Whisper ASR API on {settings.host}:{settings.port}")
     web.run_app(create_app(settings), host=settings.host, port=settings.port)
 
 

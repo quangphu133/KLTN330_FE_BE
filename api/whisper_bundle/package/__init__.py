@@ -1,4 +1,4 @@
-"""Reusable ASR package for the BuzzASR bundle."""
+"""Reusable Faster-Whisper ASR package."""
 
 from .asr import transcribe_audio, warm_up_model
 

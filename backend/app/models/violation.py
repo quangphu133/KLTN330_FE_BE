@@ -13,6 +13,7 @@ class Violation(Base):
     snippet = Column(Text, nullable=True)                   # Trích đoạn hội thoại chứa lỗi
     timestamp = Column(Float, nullable=True)                 # Thời điểm lỗi trong file audio (giây)
     severity = Column(String(20), default="medium")         # "low", "medium", "high"
+    deduction = Column(Float, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
     # Relationships

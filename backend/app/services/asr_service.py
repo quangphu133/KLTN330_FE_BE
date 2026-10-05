@@ -16,6 +16,7 @@ from app.models.call_record import CallRecord
 from app.schemas.call_schema import CallRecordCreate
 from app.schemas.ai_schema import AIModelResult, AISpeechSegment
 from app.services.call_service import CallService
+from app.services.speaker_attribution import build_stereo_attribution, configured_agent_channel
 from app.services.notification_service import create_once, update_upload_notifications
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,17 @@ def process_asr_result(db: Session, asr_job_db_id: int) -> AsrJob:
         logger.error(f"[ASR] AsrJob id={asr_job_db_id} not found in DB")
         return
 
-    _set_status(db, asr_job, "running")
+    if asr_job.call_record_id is not None:
+        logger.info("[ASR] Result already stored for job_id=%s; keeping existing call and role mapping", asr_job.job_id)
+        return asr_job
+
+    if not _set_status(db, asr_job, "running"):
+        return (
+            db.query(AsrJob)
+            .filter(AsrJob.id == asr_job_db_id)
+            .populate_existing()
+            .first()
+        )
     logger.info(f"[ASR] Polling job_id={asr_job.job_id}")
 
     try:
@@ -104,13 +115,20 @@ def process_asr_result(db: Session, asr_job_db_id: int) -> AsrJob:
     except (AsrApiError, TimeoutError) as exc:
         logger.error(f"[ASR] Job failed: {exc}")
         _set_status(db, asr_job, "failed", error_message=str(exc))
-        return
+        return (
+            db.query(AsrJob)
+            .filter(AsrJob.id == asr_job_db_id)
+            .populate_existing()
+            .first()
+        )
 
     # --- Xây dựng CallRecord ---
     full_transcript = result.get("text", "")
     raw_segments = result.get("segments", [])
     diarization = result.get("diarization")
     duration_secs = int(result.get("duration_seconds", 0))
+    audio_metadata = result.get("audio_metadata")
+    channel_quality = result.get("channel_quality")
 
     # Chuyển sang AISpeechSegment schema
     ai_segments = []
@@ -119,23 +137,88 @@ def process_asr_result(db: Session, asr_job_db_id: int) -> AsrJob:
         if diarization and diarization.get("status") in {"completed", "unsupported_speaker_count"}
         else raw_segments
     )
-    for seg in aligned_segments:
+    used_word_ids = set()
+    next_word_id = 0
+    for segment_id, seg in enumerate(aligned_segments):
+        words = []
+        for raw_word in seg.get("words") or []:
+            word = dict(raw_word)
+            word_id = word.get("id")
+            if not isinstance(word_id, int) or word_id in used_word_ids:
+                while next_word_id in used_word_ids:
+                    next_word_id += 1
+                word_id = next_word_id
+            used_word_ids.add(word_id)
+            next_word_id = max(next_word_id, word_id + 1)
+            word["id"] = word_id
+            words.append(word)
         ai_segments.append(
             AISpeechSegment(
+                id=seg.get("id") if isinstance(seg.get("id"), int) else segment_id,
                 text=seg.get("text", ""),
-                start_time=seg.get("start"),
-                end_time=seg.get("end"),
+                start_time=seg.get("start", seg.get("start_time")),
+                end_time=seg.get("end", seg.get("end_time")),
                 speaker=_normalize_speaker(seg.get("speaker")),
                 speaker_id=seg.get("speaker_id"),
+                channel=seg.get("channel"),
+                confidence=seg.get("probability", seg.get("confidence")),
+                words=words,
             )
         )
+
+    speaker_attribution = None
+    channel_count = (audio_metadata or {}).get("num_channels")
+    if channel_count == 2:
+        speaker_attribution = build_stereo_attribution(
+            [segment.model_dump(exclude_none=True) for segment in ai_segments],
+            audio_metadata,
+            channel_quality,
+            settings.DEFAULT_AGENT_CHANNEL,
+            settings.AUTO_CONFIRM_STEREO,
+            settings.ROLE_ORGANIZATION_NAMES,
+        )
+        if speaker_attribution["status"] == "confirmed":
+            for segment in ai_segments:
+                segment.speaker = speaker_attribution["assignments"].get(f"CHANNEL_{segment.channel}", "unknown")
+    elif channel_count == 1:
+        default_channel = configured_agent_channel(settings.DEFAULT_AGENT_CHANNEL)
+        speaker_attribution = {
+            "status": "pending",
+            "source": "default_config",
+            "actor": "system",
+            "agent_speaker_id": None,
+            "suggested_agent_speaker_id": None,
+            "agent_channel": None,
+            "default_agent_channel": default_channel,
+            "reason": "mono_requires_manual_word_roles",
+            "evidence": None,
+            "assignments": [],
+        }
+    else:
+        default_channel = configured_agent_channel(settings.DEFAULT_AGENT_CHANNEL)
+        speaker_attribution = {
+            "status": "pending",
+            "source": "default_config",
+            "actor": "system",
+            "agent_speaker_id": None,
+            "suggested_agent_speaker_id": f"CHANNEL_{default_channel}",
+            "agent_channel": None,
+            "default_agent_channel": default_channel,
+            "reason": "channel_metadata_missing",
+            "evidence": None,
+            "assignments": [],
+        }
 
     ai_result = AIModelResult(
         transcript=full_transcript,
         segments=ai_segments,
         duration=float(duration_secs),
         sentiment=None,
+        model=result.get("model"),
         diarization=diarization,
+        audio_metadata=audio_metadata,
+        channel_quality=channel_quality,
+        speaker_attribution=speaker_attribution,
     )
 
     call_in = CallRecordCreate(
@@ -150,17 +233,61 @@ def process_asr_result(db: Session, asr_job_db_id: int) -> AsrJob:
     )
 
     try:
-        call_record = CallService.create_call(db=db, call_in=call_in)
-        logger.info(f"[ASR] CallRecord created: id={call_record.id}")
-    except Exception as exc:
-        logger.error(f"[ASR] Failed to create CallRecord: {exc}")
-        _set_status(db, asr_job, "failed", error_message=f"CallRecord creation error: {exc}")
-        return
+        asr_job = (
+            db.query(AsrJob)
+            .filter(AsrJob.id == asr_job_db_id)
+            .with_for_update()
+            .populate_existing()
+            .first()
+        )
+        if not asr_job:
+            logger.error("[ASR] AsrJob id=%s disappeared before result storage", asr_job_db_id)
+            return
+        if asr_job.call_record_id is not None:
+            logger.info("[ASR] Another worker stored job_id=%s; keeping its call and role mapping", asr_job.job_id)
+            return asr_job
 
-    # Cập nhật AsrJob thành completed
-    asr_job.call_record_id = call_record.id
-    _set_status(db, asr_job, "completed")
-    return asr_job
+        call_record = CallService.create_call(
+            db=db,
+            call_in=call_in,
+            trusted_asr=True,
+            commit=False,
+        )
+        asr_job.call_record_id = call_record.id
+        asr_job.call_record = call_record
+        if not _set_status(db, asr_job, "completed"):
+            db.rollback()
+            return (
+                db.query(AsrJob)
+                .filter(AsrJob.id == asr_job_db_id)
+                .populate_existing()
+                .first()
+            )
+        logger.info("[ASR] CallRecord created: id=%s", call_record.id)
+        return asr_job
+    except Exception as exc:
+        db.rollback()
+        logger.error("[ASR] Failed to store CallRecord for job %s: %s", asr_job_db_id, exc)
+        current_job = (
+            db.query(AsrJob)
+            .filter(AsrJob.id == asr_job_db_id)
+            .populate_existing()
+            .first()
+        )
+        if current_job is None:
+            return None
+        _set_status(
+            db,
+            current_job,
+            "failed",
+            error_message=f"CallRecord creation error: {exc}",
+        )
+        return (
+            db.query(AsrJob)
+            .filter(AsrJob.id == asr_job_db_id)
+            .populate_existing()
+            .first()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +303,24 @@ def get_job_status(db: Session, job_id: str) -> Optional[AsrJob]:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _set_status(db: Session, asr_job: AsrJob, status: str, error_message: Optional[str] = None):
+def _set_status(db: Session, asr_job: AsrJob, status: str, error_message: Optional[str] = None) -> bool:
+    db.flush()
+    current_job = (
+        db.query(AsrJob)
+        .filter(AsrJob.id == asr_job.id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if current_job is None:
+        return False
+    if current_job.status in {"completed", "failed"}:
+        return False
+    if current_job.call_record_id is not None and status in {"running", "failed"}:
+        db.commit()
+        return False
+
+    asr_job = current_job
     asr_job.status = status
     asr_job.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
     if error_message:
@@ -193,12 +337,16 @@ def _set_status(db: Session, asr_job: AsrJob, status: str, error_message: Option
         call_record = asr_job.call_record
         diarization = ((call_record.analysis_data or {}).get("diarization") or {}) if call_record else {}
         role_mapping = diarization.get("role_mapping") or {}
+        speaker_attribution = ((call_record.analysis_data or {}).get("speaker_attribution") or {}) if call_record else {}
         speaker_ids = [str(speaker.get("speaker_id")) for speaker in diarization.get("speakers") or []]
         has_two_speakers = len(speaker_ids) == 2 and len(set(speaker_ids)) == 2
         needs_confirmation = (
-            diarization.get("status") == "completed"
-            and has_two_speakers
-            and not role_mapping.get("agent_speaker_id")
+            speaker_attribution.get("status") == "pending"
+            or (
+                diarization.get("status") == "completed"
+                and has_two_speakers
+                and not role_mapping.get("agent_speaker_id")
+            )
         )
         insufficient_speakers = (
             diarization.get("status") in {"completed", "unsupported_speaker_count"}
@@ -243,3 +391,4 @@ def _set_status(db: Session, asr_job: AsrJob, status: str, error_message: Option
             )
     db.commit()
     db.refresh(asr_job)
+    return True

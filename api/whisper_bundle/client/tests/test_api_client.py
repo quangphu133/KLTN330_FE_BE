@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from buzzasr_bundle.client.api_client import AsrApiError, submit_audio
+from whisper_bundle.client.api_client import AsrApiError, submit_audio
 
 
 class ClientTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class ClientTests(unittest.TestCase):
             audio.write_bytes(b"audio")
             response = Mock(ok=True, status_code=202)
             response.json.return_value = {"job_id": "abc", "status": "queued"}
-            with patch("buzzasr_bundle.client.api_client.requests.post", return_value=response) as post:
+            with patch("whisper_bundle.client.api_client.requests.post", return_value=response) as post:
                 result = submit_audio("http://gpu:8000", audio, "secret")
             self.assertEqual(result["job_id"], "abc")
             self.assertEqual(post.call_args.kwargs["headers"], {"Authorization": "Bearer secret"})
@@ -29,7 +29,7 @@ class ClientTests(unittest.TestCase):
             response.json.return_value = {
                 "error": {"code": "queue_full", "message": "The ASR queue is full."}
             }
-            with patch("buzzasr_bundle.client.api_client.requests.post", return_value=response):
+            with patch("whisper_bundle.client.api_client.requests.post", return_value=response):
                 with self.assertRaises(AsrApiError) as context:
                     submit_audio("http://gpu:8000", audio, "secret")
         self.assertEqual(context.exception.code, "queue_full")

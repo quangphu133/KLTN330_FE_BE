@@ -54,12 +54,14 @@ interface TranscriptProps {
   Stt?: Stt | null;
   currentPlayerTime?: number;
   summary: string;
+  onSeek?: (seconds: number) => void;
 }
 
 interface TextProps {
   text: string;
   currentPlayerTime: number;
   message: MessageType;
+  onSeek?: (seconds: number) => void;
 }
 
 export const processStt = (Stt: Stt): MessageType[] => {
@@ -90,21 +92,18 @@ export const processStt = (Stt: Stt): MessageType[] => {
         ? '--:--'
         : `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 
-      const sender =
-        chunk.speaker === 'agent' || chunk.speaker === 'customer'
-          ? chunk.speaker
-          : chunk.speakerId
-            ? 'unknown'
-            : chunk.channel === 0
-            ? 'customer'
-            : 'agent';
+      const sender = chunk.speaker === 'agent' || chunk.speaker === 'customer'
+        ? chunk.speaker
+        : 'unknown';
       const speakerLabel = chunk.speaker === 'agent'
         ? 'Nhân viên'
         : chunk.speaker === 'customer'
           ? 'Khách hàng'
           : chunk.speakerId
             ? speakerLabels.get(chunk.speakerId)
-            : undefined;
+            : hasChannel1
+              ? `Kênh ${chunk.channel + 1}`
+              : undefined;
 
       const shouldCombineWithPrevious =
         currentMessage &&
@@ -127,7 +126,7 @@ export const processStt = (Stt: Stt): MessageType[] => {
           startTime: chunk.startTime,
           endTime: chunk.endTime,
           regions: chunk.regions,
-          id: `message-${index}-${Date.now()}`,
+          id: `message-${index}-${chunk.id ?? chunk.startChar}`,
           isMono: !hasSpeakerLabels && !hasChannel1,
           speakerLabel,
         };
@@ -153,7 +152,7 @@ export const processStt = (Stt: Stt): MessageType[] => {
         startTime: chunk.startTime,
         endTime: chunk.endTime,
         regions: chunk.regions,
-        id: `message-${index}-${Date.now()}`,
+        id: `message-${index}-${chunk.id ?? chunk.startChar}`,
         isMono: true,
       };
 
@@ -168,7 +167,35 @@ export const Text: React.FC<TextProps> = ({
   text,
   currentPlayerTime,
   message,
+  onSeek,
 }) => {
+  const regions = [...(message.regions ?? [])].sort((left, right) => left.startChar - right.startChar);
+  if (regions.length) {
+    let offset = 0;
+    const parts: React.ReactNode[] = [];
+    regions.forEach((region, index) => {
+      const start = Math.max(0, region.startChar - message.startChar);
+      const end = Math.min(text.length, region.endChar - message.startChar);
+      if (start < offset || end <= start) return;
+      if (start > offset) parts.push(text.slice(offset, start));
+      const active = currentPlayerTime >= region.startTime && currentPlayerTime <= region.endTime;
+      parts.push(
+        <button
+          key={`${region.startChar}-${index}`}
+          type="button"
+          onClick={() => onSeek?.(region.startTime)}
+          className={`rounded-sm text-left hover:underline ${active ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/50 dark:text-yellow-200' : ''}`}
+          title={`Phát từ ${region.startTime.toFixed(1)} giây`}
+        >
+          {text.slice(start, end)}
+        </button>,
+      );
+      offset = end;
+    });
+    if (offset < text.length) parts.push(text.slice(offset));
+    return <p>{parts}</p>;
+  }
+
   if (
     message.startTime !== null &&
     message.endTime !== null &&
@@ -216,6 +243,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   Stt,
   currentPlayerTime = 0,
   summary,
+  onSeek,
 }) => {
   const [messages, setMessages] = useState<MessageType[]>([]);
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
@@ -241,8 +269,12 @@ export const Transcript: React.FC<TranscriptProps> = ({
     );
 
     if (activeMessage) {
-      setActiveMessageId(activeMessage.id);
-      const messageElement = messageRefs.current[activeMessage.id];
+      if (activeMessageId !== activeMessage.id) {
+        setActiveMessageId(activeMessage.id);
+      }
+      const messageElement = activeMessageId !== activeMessage.id
+        ? messageRefs.current[activeMessage.id]
+        : null;
       if (messageElement && containerRef.current) {
         messageElement.scrollIntoView({
           behavior: 'smooth',
@@ -252,7 +284,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     } else {
       setActiveMessageId(null);
     }
-  }, [currentPlayerTime, messages]);
+  }, [activeMessageId, currentPlayerTime, messages]);
 
   return (
     // <div  /*className="max-h-[calc(100vh-480px)] overflow-y-hidden"*/>
@@ -333,6 +365,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
                     text={message.text}
                     currentPlayerTime={currentPlayerTime}
                     message={message}
+                    onSeek={onSeek}
                   />
                 </div>
                 <div

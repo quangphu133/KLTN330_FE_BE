@@ -31,8 +31,15 @@ class Settings:
     ASR_BASE_URL: str = os.getenv("ASR_BASE_URL", "http://127.0.0.1:8000")
     ASR_API_KEY: str = os.getenv("ASR_API_KEY", "")
     ASR_CONNECT_TIMEOUT_SECONDS: float = float(os.getenv("ASR_CONNECT_TIMEOUT_SECONDS", "5"))
+    DEFAULT_AGENT_CHANNEL: int = int(os.getenv("DEFAULT_AGENT_CHANNEL", "0"))
+    AUTO_CONFIRM_STEREO: bool = os.getenv("AUTO_CONFIRM_STEREO", "false").strip().lower() in {"1", "true", "yes"}
+    ROLE_ORGANIZATION_NAMES: tuple = tuple(
+        name.strip() for name in os.getenv("ROLE_ORGANIZATION_NAMES", "HUIT,VinID").split(",") if name.strip()
+    )
 
 settings = Settings()
+if settings.DEFAULT_AGENT_CHANNEL not in (0, 1):
+    raise ValueError("DEFAULT_AGENT_CHANNEL must be 0 or 1")
 
 # Đảm bảo thư mục upload tồn tại
 settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

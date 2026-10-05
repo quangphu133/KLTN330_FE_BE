@@ -9,6 +9,7 @@ import {
   useMarkNotificationReadMutation,
 } from '@/entities/notifications.api'
 import { formatDates } from '@/shared/utils/date-utils'
+import { useGetProfileQuery } from '@/entities/auth/auth.api'
 
 type NotificationItemProps = {
   data: CallNotification
@@ -75,7 +76,13 @@ export const NotificationDropdown = () => {
     { pollingInterval: 10 * 1000, skipPollingIfUnfocused: true, refetchOnFocus: true }
   )
   const [markNotificationRead] = useMarkNotificationReadMutation()
-  const notifying = notifications.some(notification => !notification.is_read)
+  const { data: profile } = useGetProfileQuery()
+  const visibleNotifications = profile?.role === 'admin'
+    ? notifications
+    : notifications.filter(notification =>
+      !['needs_confirmation', 'insufficient_speakers', 'speaker_roles_pending'].includes(notification.event_type),
+    )
+  const notifying = visibleNotifications.some(notification => !notification.is_read)
 
   const handleRead = useCallback(
     (id: number) => {
@@ -154,7 +161,7 @@ export const NotificationDropdown = () => {
         </div>
         <div className="flex justify-between items-center px-1 mb-2 text-theme-sm">
           <span className="text-gray-500 dark:text-gray-300">
-            {notifications.length} thông báo
+            {visibleNotifications.length} thông báo
           </span>
         </div>
         <ul className="flex flex-col h-auto overflow-y-auto custom-scrollbar">
@@ -163,8 +170,8 @@ export const NotificationDropdown = () => {
               Không thể tải thông báo. Dữ liệu cũ (nếu có) vẫn được giữ lại.
             </li>
           )}
-          {notifications.length > 0 ? (
-            notifications.map(notification => (
+          {visibleNotifications.length > 0 ? (
+            visibleNotifications.map(notification => (
               <NotificationItem
                 key={notification.id}
                 data={notification}

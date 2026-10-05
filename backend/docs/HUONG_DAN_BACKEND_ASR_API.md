@@ -60,7 +60,7 @@ python -m pytest tests\test_api.py -v
 ASR API là tiến trình riêng trên máy có model. Chạy từ thư mục máy có model:
 
 ```powershell
-.\.venv\Scripts\python.exe -m buzzasr_bundle.package.api_server
+.\.venv\Scripts\python.exe -m whisper_bundle.package.api_server
 ```
 
 Khi kiểm thử luồng hoàn chỉnh, phải giữ ASR API trên máy GPU và backend cùng hoạt động.
@@ -158,7 +158,7 @@ queued -> running -> completed
 Sao chép thư mục sau sang backend:
 
 ```text
-buzzasr_bundle/client
+whisper_bundle/client
 ```
 
 Có thể đổi tên thư mục thành:

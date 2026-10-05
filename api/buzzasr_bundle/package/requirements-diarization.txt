@@ -1,7 +1,0 @@
-# Install this file in a dedicated ASR diarization environment.
---extra-index-url https://download.pytorch.org/whl/cu128
-pyannote.audio==4.0.7
-torchcodec==0.9.0
-torch==2.9.1+cu128
-torchaudio==2.9.1+cu128
-av==18.1.0

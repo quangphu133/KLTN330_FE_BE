@@ -102,7 +102,8 @@ def analyze_transcript(
                 "keyword_detected": None,
                 "snippet": f"Thiếu: {rule_info['description']}",
                 "timestamp": 0.0,
-                "severity": rule_info["severity"]
+                "severity": rule_info["severity"],
+                "deduction": rule_info["deduction"],
             })
 
     # 2. Kiểm tra từ cấm
@@ -120,7 +121,8 @@ def analyze_transcript(
                         "keyword_detected": keyword,
                         "snippet": f"[{seg.speaker.upper() if seg.speaker else 'SPEAKER'}]: {seg.text}",
                         "timestamp": round(seg.start_time, 2),
-                        "severity": rule["severity"]
+                        "severity": rule["severity"],
+                        "deduction": rule["deduction"],
                     })
     else:
         # Nếu chỉ có chuỗi văn bản thô
@@ -139,7 +141,8 @@ def analyze_transcript(
                     "keyword_detected": keyword,
                     "snippet": f"...{snippet}...",
                     "timestamp": round(start_idx / 15.0, 2),
-                    "severity": rule["severity"]
+                    "severity": rule["severity"],
+                    "deduction": rule["deduction"],
                 })
 
     # Điểm tuân thủ tối thiểu là 0.0

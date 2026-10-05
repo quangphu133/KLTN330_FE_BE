@@ -1,0 +1,2 @@
+-- Keep deduction values when rolling back application code.
+-- Do not drop the column: historical score deductions cannot be reconstructed.

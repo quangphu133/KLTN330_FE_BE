@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("outputs"),
         help="Directory for JSON, TXT and SRT files",
     )
-    parser.add_argument("--model", default="buzzasr", help=f"Model alias or path (aliases: {', '.join(MODEL_ALIASES)})")
+    parser.add_argument("--model", default="large-v3", choices=tuple(MODEL_ALIASES))
     parser.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
     parser.add_argument("--compute-type", default="float16")
     parser.add_argument("--language", default="vi")

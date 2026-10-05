@@ -89,7 +89,12 @@ def get_my_analytics(
     scored = [record.compliance_score for record in records if record.compliance_score is not None]
     pending = 0
     for record in records:
-        diarization = (record.analysis_data or {}).get("diarization") or {}
+        analysis_data = record.analysis_data or {}
+        speaker_attribution = analysis_data.get("speaker_attribution") or {}
+        diarization = analysis_data.get("diarization") or {}
+        if speaker_attribution.get("status") == "pending":
+            pending += 1
+            continue
         speakers = diarization.get("speakers") or []
         speaker_ids = [str(speaker.get("speaker_id")) for speaker in speakers]
         if (

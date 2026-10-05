@@ -5,7 +5,13 @@ from pathlib import Path
 
 
 test_database = Path(tempfile.gettempdir()) / f"kltn330_backend_tests_{uuid.uuid4().hex}.sqlite3"
-os.environ["DATABASE_URL"] = f"sqlite:///{test_database.as_posix()}"
+isolated_database_url = os.environ.get("KLTN_TEST_DATABASE_URL")
+if isolated_database_url:
+    if "test" not in isolated_database_url.rsplit("/", 1)[-1].lower():
+        raise ValueError("KLTN_TEST_DATABASE_URL must point to a database whose name includes 'test'")
+    os.environ["DATABASE_URL"] = isolated_database_url
+else:
+    os.environ["DATABASE_URL"] = f"sqlite:///{test_database.as_posix()}"
 
 import sys
 

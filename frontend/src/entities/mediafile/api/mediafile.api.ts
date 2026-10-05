@@ -89,7 +89,27 @@ export const MediaFileApi = commonApi.injectEndpoints({
         method: 'PUT',
         body: { agentSpeakerId },
       }),
-      invalidatesTags: ['MEDIAFILE'],
+      invalidatesTags: ['MEDIAFILE', 'ANALYTICS_DASHBOARD', 'NOTIFICATIONS'],
+    }),
+    confirmWordRoles: builder.mutation<
+      MediaFileResultResponse,
+      {
+        id: number;
+        assignments: { startWordId: number; endWordId: number; role: 'agent' | 'customer' }[];
+      }
+    >({
+      query: ({ id, assignments }) => ({
+        url: `api/mediafile/${id}/word-roles`,
+        method: 'PUT',
+        body: {
+          assignments: assignments.map(({ startWordId, endWordId, role }) => ({
+            startWordId,
+            endWordId,
+            role,
+          })),
+        },
+      }),
+      invalidatesTags: ['MEDIAFILE', 'ANALYTICS_DASHBOARD', 'NOTIFICATIONS'],
     }),
     deleteCallRecord: builder.mutation<
       { status: string; message: string },
@@ -136,5 +156,6 @@ export const {
   useLazyGetDownloadFileExcelQuery,
   useGetMediaFileResultQuery,
   useConfirmSpeakerRolesMutation,
+  useConfirmWordRolesMutation,
   useDeleteCallRecordMutation,
 } = MediaFileApi;

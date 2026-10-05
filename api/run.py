@@ -1,4 +1,4 @@
-from buzzasr_bundle.package.api_server import main
+from whisper_bundle.package.api_server import main
 
 
 if __name__ == "__main__":

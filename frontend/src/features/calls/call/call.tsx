@@ -21,6 +21,7 @@ import {
   useGetMediaFileByIdQuery,
   useGetMediaFileResultQuery,
   useConfirmSpeakerRolesMutation,
+  useConfirmWordRolesMutation,
   useDeleteCallRecordMutation,
 } from '@/entities/mediafile/api/mediafile.api';
 import { useGetProfileQuery } from '@/entities/auth/auth.api';
@@ -34,6 +35,7 @@ import './call.css';
 import { appRoutes } from '@/shared/constants/routes';
 import { LoaderContent } from '@/shared/ui/loader';
 import { toast } from 'react-toastify';
+import type { SttRegion } from '@/entities/mediafile/api/mediafile.types';
 
 enum CallTab {
   Transcript = 'transcript',
@@ -58,6 +60,15 @@ type AudioIndicator = {
   }[];
 };
 
+type RoleDraftRegion = {
+  id: string;
+  startWordId: number;
+  endWordId: number;
+  role: 'agent' | 'customer' | null;
+};
+
+type TimedWord = SttRegion & { wordId: number; text: string };
+
 export const Call = () => {
   const params = useParams();
   const router = useRouter();
@@ -72,6 +83,7 @@ export const Call = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [regionsReadyVersion, setRegionsReadyVersion] = useState(0);
   const [wavesurferReady, setWavesurferReady] = useState(isDemoMode);
   const regionsAddedRef = useRef(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -79,16 +91,21 @@ export const Call = () => {
 
   const { data: mediaFileById, isLoading } = useGetMediaFileByIdQuery(
     { id },
-    { pollingInterval: isDemoMode ? 0 : 10_000 },
+    { pollingInterval: isDemoMode ? 0 : 10_000, skipPollingIfUnfocused: true, refetchOnFocus: true },
   );
+  const numChannels = mediaFileById?.numChannels ?? 0;
+  const hasMultipleChannels = numChannels > 1;
+  const mediaFileId = mediaFileById?.id;
 
   const { data: mediaFileResult } = useGetMediaFileResultQuery({
     id,
     negativeProbThreshold: 0.15,
     simultaneousSilenceDurationThreshold: 10,
-  }, { pollingInterval: isDemoMode ? 0 : 10_000 });
+  }, { pollingInterval: isDemoMode ? 0 : 10_000, skipPollingIfUnfocused: true, refetchOnFocus: true });
   const [confirmSpeakerRoles, { isLoading: isConfirmingSpeakerRoles }] =
     useConfirmSpeakerRolesMutation();
+  const [confirmWordRoles, { isLoading: isConfirmingWordRoles }] =
+    useConfirmWordRolesMutation();
   const [deleteCallRecord, { isLoading: isDeletingCall }] =
     useDeleteCallRecordMutation();
   const diarization = mediaFileResult?.diarization?.status
@@ -96,9 +113,77 @@ export const Call = () => {
     : null;
   const roleMapping = mediaFileResult?.roleMapping;
   const [selectedAgentSpeakerId, setSelectedAgentSpeakerId] = useState('');
+  const [draftRegions, setDraftRegions] = useState<RoleDraftRegion[]>([]);
+  const [selectedDraftRegionId, setSelectedDraftRegionId] = useState<string | null>(null);
+  const roleRegionIdsRef = useRef<Set<string>>(new Set());
+  const [roleDraftError, setRoleDraftError] = useState<string | null>(null);
+  const roleDraftDirtyRef = useRef(false);
+  const isAdmin = !isDemoMode && profile?.role === 'admin';
+
+  const timedWords = useMemo<TimedWord[]>(() => {
+    const chunks = mediaFileResult?.stt?.chunks ?? [];
+    return chunks.flatMap((chunk) => {
+      return (chunk.regions ?? []).flatMap((region) => {
+        const wordId = region.wordId ?? region.word_id;
+        const text = mediaFileResult?.stt?.text?.slice(region.startChar, region.endChar)
+          ?? chunk.text.slice(Math.max(0, region.startChar - chunk.startChar), Math.max(0, region.endChar - chunk.startChar));
+        return wordId === undefined || region.startTime == null || region.endTime == null
+          ? []
+          : [{ ...region, wordId, text: text.trim() }];
+      });
+    }).sort((left, right) => left.startTime - right.startTime || left.wordId - right.wordId);
+  }, [mediaFileResult?.stt]);
+  const timedWordsRef = useRef<TimedWord[]>(timedWords);
+  timedWordsRef.current = timedWords;
+
+  const hasWordIds = timedWords.length > 0;
+  const isRolePending = roleMapping?.status === 'pending' || mediaFileById?.speakerRoleStatus === 'pending';
+  const canAdminCorrectStereo = isAdmin && hasMultipleChannels &&
+    roleMapping?.agent_speaker_id?.startsWith('CHANNEL_') === true;
+  const needsAdminRoleConfirmation = isRolePending || Boolean(
+    diarization?.status === 'completed' && !roleMapping?.agent_speaker_id,
+  );
+  const isConfirmedMonoRoleMap = !hasMultipleChannels && roleMapping?.status === 'confirmed';
+  const isMonoWordEditor = isAdmin && !hasMultipleChannels && hasWordIds &&
+    (needsAdminRoleConfirmation || isConfirmedMonoRoleMap);
+  const showAdminRolePanel = isAdmin && (needsAdminRoleConfirmation || canAdminCorrectStereo || isMonoWordEditor);
+  const roleDraftIsComplete = timedWords.length > 0 &&
+    draftRegions.length > 0 &&
+    draftRegions.every((range) => range.startWordId <= range.endWordId &&
+      timedWords.some((word) => word.wordId === range.startWordId) &&
+      timedWords.some((word) => word.wordId === range.endWordId)) &&
+    draftRegions.every((range, index) => draftRegions.every((other, otherIndex) =>
+      index === otherIndex || range.endWordId < other.startWordId || other.endWordId < range.startWordId,
+    )) &&
+    draftRegions.every((range) => range.role !== null) &&
+    timedWords.every((word) => draftRegions.filter((range) =>
+      word.wordId >= range.startWordId && word.wordId <= range.endWordId,
+    ).length === 1) &&
+    draftRegions.some((range) => range.role === 'agent');
 
   useEffect(() => {
-    const selected = roleMapping?.agent_speaker_id ?? roleMapping?.suggested_agent_speaker_id;
+    roleDraftDirtyRef.current = false;
+    roleRegionIdsRef.current.clear();
+    setDraftRegions([]);
+    setSelectedDraftRegionId(null);
+    setRoleDraftError(null);
+    setSelectedAgentSpeakerId('');
+  }, [id]);
+
+  useEffect(() => {
+    if (roleDraftDirtyRef.current) return;
+    const existing = Array.isArray(roleMapping?.assignments) ? roleMapping.assignments : [];
+    setDraftRegions(existing.map((assignment, index) => ({
+      id: `saved-${index}`,
+      startWordId: assignment.start_word_id,
+      endWordId: assignment.end_word_id,
+      role: assignment.role,
+    })));
+  }, [roleMapping?.assignments]);
+
+  useEffect(() => {
+    const selected = roleMapping?.agent_speaker_id ?? roleMapping?.suggested_agent_speaker_id ??
+      (roleMapping?.default_agent_channel != null ? `CHANNEL_${roleMapping.default_agent_channel}` : undefined);
     if (selected && !selectedAgentSpeakerId) {
       setSelectedAgentSpeakerId(selected);
     }
@@ -115,6 +200,56 @@ export const Call = () => {
     } catch (error) {
       const apiError = error as { data?: { detail?: string } };
       toast.error(apiError.data?.detail ?? 'Không thể xác nhận vai trò người nói');
+    }
+  };
+
+  const handleConfirmWordRoles = async () => {
+    const orderedWords = [...timedWords].sort((left, right) => left.wordId - right.wordId);
+    const assigned = orderedWords.map((word) => draftRegions.filter((range) =>
+      word.wordId >= range.startWordId && word.wordId <= range.endWordId,
+    ));
+    const rangesAreValid = draftRegions.every((range) => range.startWordId <= range.endWordId &&
+      orderedWords.some((word) => word.wordId === range.startWordId) &&
+      orderedWords.some((word) => word.wordId === range.endWordId));
+    const rangesOverlap = draftRegions.some((range, index) => draftRegions.some((other, otherIndex) =>
+      index !== otherIndex && range.startWordId <= other.endWordId && other.startWordId <= range.endWordId,
+    ));
+    if (!rangesAreValid || rangesOverlap || draftRegions.some((range) => !range.role) || assigned.some((ranges) => ranges.length !== 1) ||
+      !draftRegions.some((range) => range.role === 'agent')) {
+      setRoleDraftError('Hãy gán đúng một vai trò cho mọi từ và chọn ít nhất một từ của nhân viên.');
+      return;
+    }
+
+    const assignments: { startWordId: number; endWordId: number; role: 'agent' | 'customer' }[] = [];
+    for (const range of [...draftRegions].sort((left, right) => left.startWordId - right.startWordId)) {
+      if (!range.role) continue;
+      const previous = assignments[assignments.length - 1];
+      if (previous && previous.role === range.role && previous.endWordId + 1 === range.startWordId) {
+        previous.endWordId = range.endWordId;
+      } else {
+        assignments.push({ startWordId: range.startWordId, endWordId: range.endWordId, role: range.role });
+      }
+    }
+
+    setRoleDraftError(null);
+    try {
+      await confirmWordRoles({ id, assignments }).unwrap();
+      roleDraftDirtyRef.current = false;
+      for (const regionId of roleRegionIdsRef.current) {
+        regionsPluginRef.current?.getRegions().find((region: any) => region.id === regionId)?.remove();
+      }
+      roleRegionIdsRef.current.clear();
+      setSelectedDraftRegionId(null);
+      setDraftRegions(assignments.map((assignment, index) => ({
+        id: `saved-${index}`,
+        startWordId: assignment.startWordId,
+        endWordId: assignment.endWordId,
+        role: assignment.role,
+      })));
+      toast.success('Đã lưu vai trò từng từ và tính lại kết quả đánh giá');
+    } catch (error) {
+      const apiError = error as { data?: { detail?: string } };
+      setRoleDraftError(apiError.data?.detail ?? 'Không thể lưu vai trò. Bản nháp vẫn được giữ lại.');
     }
   };
 
@@ -247,9 +382,6 @@ export const Call = () => {
     ];
   }, [mediaFileResult]);
 
-  const numChannels = mediaFileById?.numChannels ?? 0;
-  const hasMultipleChannels = numChannels > 1;
-
   const createRegions = useCallback(() => {
     if (
       !wavesurferRef.current ||
@@ -361,10 +493,112 @@ export const Call = () => {
     });
 
     regionsAddedRef.current = true;
+    setRegionsReadyVersion((version) => version + 1);
   }, [audioIndicators]);
 
+  const snapDraftRegion = useCallback((region: any) => {
+    const words = timedWordsRef.current;
+    if (!words.length) return;
+    const startTime = Math.min(region.start, region.end);
+    const endTime = Math.max(region.start, region.end);
+    const startIndex = words.reduce((best, word, index) =>
+      Math.abs(word.startTime - startTime) < Math.abs(words[best].startTime - startTime) ? index : best, 0);
+    const endIndex = words.reduce((best, word, index) =>
+      Math.abs(word.endTime - endTime) < Math.abs(words[best].endTime - endTime) ? index : best, 0);
+    const first = words[Math.min(startIndex, endIndex)];
+    const last = words[Math.max(startIndex, endIndex)];
+    region.setOptions({ start: first.startTime, end: last.endTime, channelIdx: 0 });
+    roleDraftDirtyRef.current = true;
+    setRoleDraftError(null);
+    setDraftRegions((previous) => {
+      const current = previous.find((range) => range.id === region.id);
+      return [
+        ...previous.filter((range) => range.id !== region.id),
+        {
+          id: region.id,
+          startWordId: first.wordId,
+          endWordId: last.wordId,
+          role: current?.role ?? null,
+        },
+      ].sort((left, right) => left.startWordId - right.startWordId);
+    });
+  }, []);
+
   useEffect(() => {
-    if (!containerRef.current || !mediaFileById) return;
+    const plugin = regionsPluginRef.current;
+    if (!isMonoWordEditor || !wavesurferReady || !regionsAddedRef.current || !plugin) return;
+
+    const unsubscribe = plugin.on('region-created', (region: any) => {
+      if (!region.id.startsWith('region-') || !region.drag || !region.resize) return;
+      roleRegionIdsRef.current.add(region.id);
+      region.setOptions({ color: 'rgba(147, 51, 234, 0.28)', channelIdx: 0 });
+      setSelectedDraftRegionId(region.id);
+      snapDraftRegion(region);
+      region.on('update', () => { roleDraftDirtyRef.current = true; });
+      region.on('update-end', () => snapDraftRegion(region));
+      region.on('click', () => setSelectedDraftRegionId(region.id));
+    });
+    const disableDragSelection = plugin.enableDragSelection({
+      color: 'rgba(147, 51, 234, 0.28)',
+      drag: true,
+      resize: true,
+      channelIdx: 0,
+    });
+    return () => {
+      disableDragSelection();
+      unsubscribe();
+    };
+  }, [isMonoWordEditor, regionsReadyVersion, snapDraftRegion, wavesurferReady]);
+
+  useEffect(() => {
+    const plugin = regionsPluginRef.current;
+    if (!isMonoWordEditor || !wavesurferReady || !regionsAddedRef.current || !plugin) return;
+
+    if (!roleDraftDirtyRef.current) {
+      const activeIds = new Set(draftRegions.map((range) => range.id));
+      for (const regionId of roleRegionIdsRef.current) {
+        if (!activeIds.has(regionId)) {
+          plugin.getRegions().find((region: any) => region.id === regionId)?.remove();
+          roleRegionIdsRef.current.delete(regionId);
+        }
+      }
+    }
+
+    for (const range of draftRegions) {
+      const firstWord = timedWords.find((word) => word.wordId === range.startWordId);
+      const lastWord = timedWords.find((word) => word.wordId === range.endWordId);
+      if (!firstWord || !lastWord) continue;
+
+      const color = range.role === 'agent'
+        ? 'rgba(126, 34, 206, 0.42)'
+        : range.role === 'customer'
+          ? 'rgba(37, 99, 235, 0.35)'
+          : 'rgba(147, 51, 234, 0.28)';
+      let region = plugin.getRegions().find((item: any) => item.id === range.id);
+      if (!region) {
+        region = plugin.addRegion({
+          id: range.id,
+          start: firstWord.startTime,
+          end: lastWord.endTime,
+          color,
+          drag: true,
+          resize: true,
+          channelIdx: 0,
+        });
+        roleRegionIdsRef.current.add(region.id);
+        region.on('update', () => { roleDraftDirtyRef.current = true; });
+        region.on('update-end', () => snapDraftRegion(region));
+        region.on('click', () => setSelectedDraftRegionId(region.id));
+      } else {
+        if (!roleDraftDirtyRef.current) {
+          region.setOptions({ start: firstWord.startTime, end: lastWord.endTime, color, channelIdx: 0 });
+        }
+      }
+    }
+  }, [draftRegions, isMonoWordEditor, regionsReadyVersion, snapDraftRegion, timedWords, wavesurferReady]);
+
+  useEffect(() => {
+    if (!containerRef.current || !mediaFileId) return;
 
     if (wavesurferRef.current) {
       wavesurferRef.current.destroy();
@@ -448,7 +682,7 @@ export const Call = () => {
       const blob = new Blob([buffer], { type: 'audio/wav' });
       wavesurfer.loadBlob(blob);
     } else {
-      const audioUrl = `${process.env.NEXT_PUBLIC_BASE_API_URL}api/mediafile/${mediaFileById.id}/stream`;
+      const audioUrl = `${process.env.NEXT_PUBLIC_BASE_API_URL}api/mediafile/${mediaFileId}/stream`;
       fetch(audioUrl, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -493,7 +727,7 @@ export const Call = () => {
         wavesurferRef.current.destroy();
       }
     };
-  }, [mediaFileById, hasMultipleChannels, numChannels, isDemoMode, token]);
+  }, [mediaFileId, hasMultipleChannels, numChannels, isDemoMode, token]);
 
 
 
@@ -737,50 +971,122 @@ export const Call = () => {
           </div>
         </div>
 
-        {diarization?.status === 'completed' && (
+        {mediaFileResult && (
+          <section className="mb-6 rounded-xl border border-gray-200 p-4 dark:border-gray-700" aria-label="Kết quả đánh giá">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <h2 className="text-lg font-semibold text-green-700 dark:text-green-300">
+                {mediaFileResult.complianceScore ?? mediaFileById?.complianceScore ?? 'Chưa có điểm'}
+                {(mediaFileResult.complianceScore ?? mediaFileById?.complianceScore) != null && ' / 100'}
+              </h2>
+              <span className="text-sm text-gray-500 dark:text-gray-400">Điểm tuân thủ theo quy tắc máy chủ</span>
+            </div>
+            <div className="mt-3 space-y-2">
+              {(mediaFileResult.keywordsSearchResult?.regions ?? []).map((finding, index) => (
+                <div key={`${finding.category}-${finding.startChar}-${index}`} className="flex flex-wrap items-start justify-between gap-2 rounded-lg bg-gray-50 px-3 py-2 text-sm dark:bg-gray-900">
+                  <div>
+                    <span className="font-medium">{finding.displayName ?? finding.categoryName ?? 'Phát hiện'}</span>
+                    {finding.snippet && <p className="mt-1 text-gray-600 dark:text-gray-300">{finding.snippet}</p>}
+                  </div>
+                  <span className="text-red-700 dark:text-red-300">
+                    {finding.deduction == null ? 'Mức trừ chưa có dữ liệu' : `−${finding.deduction} điểm`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {showAdminRolePanel && (
           <div className="mb-6 rounded-xl border border-purple-100 bg-purple-50 p-4 dark:border-purple-900/60 dark:bg-purple-950/40">
-            <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div className="flex flex-col gap-3">
               <div>
-                <h3 className="font-semibold text-purple-900 dark:text-purple-200">Xác nhận người nói</h3>
+                <h3 className="font-semibold text-purple-900 dark:text-purple-200">
+                  {isConfirmedMonoRoleMap || canAdminCorrectStereo ? 'Admin chỉnh sửa vai trò người nói' : 'Admin xác nhận vai trò người nói'}
+                </h3>
                 <p className="mt-1 text-sm text-purple-700 dark:text-purple-300">
-                  {roleMapping?.suggestion_reason
-                    ? `Gợi ý nhân viên dựa trên câu: “${roleMapping.suggestion_reason}”`
-                    : 'Chọn người nói là nhân viên để hệ thống chấm regex đúng người.'}
+                  {roleMapping?.suggestion_reason ?? roleMapping?.reason ?? 'Kiểm tra phân vai trước khi máy chủ tính điểm tuân thủ.'}
                 </p>
+                {roleMapping?.source === 'regex' && <p className="mt-1 text-sm text-purple-700 dark:text-purple-300">Gợi ý tự động dựa trên câu mở đầu; admin có thể sửa trước khi xác nhận.</p>}
+                {roleMapping?.agent_speaker_id?.startsWith('CHANNEL_') && <p className="mt-1 text-sm text-purple-700 dark:text-purple-300">Kết quả hiện tại: {roleMapping.agent_speaker_id.replace('CHANNEL_', 'Kênh ')} là nhân viên. Chọn kênh khác để sửa phân vai.</p>}
+                {roleMapping?.source === 'default_config' && <p className="mt-1 text-sm text-purple-700 dark:text-purple-300">Gợi ý mặc định của giao diện: Kênh {(roleMapping.default_agent_channel ?? 0) + 1}; hãy xác nhận sau khi nghe lại.</p>}
+                {roleMapping?.evidence?.sentence && (
+                  <p className="mt-1 text-sm text-purple-700 dark:text-purple-300">
+                    Bằng chứng Kênh {(roleMapping.evidence.channel ?? 0) + 1}: “{roleMapping.evidence.sentence}”
+                  </p>
+                )}
               </div>
-              <div className="flex items-center gap-2">
-                <select
-                  value={selectedAgentSpeakerId}
-                  onChange={(event) => setSelectedAgentSpeakerId(event.target.value)}
-                  className="rounded-lg border border-purple-200 bg-white px-3 py-2 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
-                >
-                  <option value="">Chọn người nói</option>
-                  {diarization.speakers.map((speaker, index) => (
-                    <option key={speaker.speaker_id} value={speaker.speaker_id}>
-                      {speaker.role === 'agent'
-                        ? 'Nhân viên'
-                        : speaker.role === 'customer'
-                          ? 'Khách hàng'
-                          : `Người nói ${index + 1}`}
-                    </option>
+              {isMonoWordEditor ? (
+                <div className="space-y-3 rounded-lg border border-purple-200 bg-white p-3 dark:border-purple-900 dark:bg-gray-950">
+                  <p className="text-sm text-gray-700 dark:text-gray-300">Kéo hoặc kéo mép vùng trên sóng âm để chọn từ; vùng sẽ khớp ranh giới từ. Sau đó gán vai trò cho từng vùng.</p>
+                  {selectedDraftRegionId && (() => {
+                    const selected = draftRegions.find((range) => range.id === selectedDraftRegionId);
+                    const text = selected ? timedWords.filter((word) => word.wordId >= selected.startWordId && word.wordId <= selected.endWordId).map((word) => word.text).join(' ') : '';
+                    return selected ? <div className="text-sm"><span className="font-medium">Đang chọn:</span> {text || 'Vùng đã chọn'}</div> : null;
+                  })()}
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" disabled={!selectedDraftRegionId} onClick={() => {
+                      const region = regionsPluginRef.current?.getRegions().find((item: any) => item.id === selectedDraftRegionId);
+                      region?.setOptions({ color: 'rgba(126, 34, 206, 0.42)' });
+                      roleDraftDirtyRef.current = true;
+                      setDraftRegions((previous) => previous.map((range) => range.id === selectedDraftRegionId ? { ...range, role: 'agent' } : range));
+                    }} className="rounded-lg bg-purple-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">Nhân viên</button>
+                    <button type="button" disabled={!selectedDraftRegionId} onClick={() => {
+                      const region = regionsPluginRef.current?.getRegions().find((item: any) => item.id === selectedDraftRegionId);
+                      region?.setOptions({ color: 'rgba(37, 99, 235, 0.35)' });
+                      roleDraftDirtyRef.current = true;
+                      setDraftRegions((previous) => previous.map((range) => range.id === selectedDraftRegionId ? { ...range, role: 'customer' } : range));
+                    }} className="rounded-lg bg-blue-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">Khách hàng</button>
+                    <button type="button" disabled={!selectedDraftRegionId} onClick={() => {
+                      regionsPluginRef.current?.getRegions().find((item: any) => item.id === selectedDraftRegionId)?.remove();
+                      roleDraftDirtyRef.current = true;
+                      setDraftRegions((previous) => previous.filter((range) => range.id !== selectedDraftRegionId));
+                      setSelectedDraftRegionId(null);
+                    }} className="rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-700 disabled:opacity-50">Bỏ vùng</button>
+                  </div>
+                  {draftRegions.map((range) => (
+                    <button key={range.id} type="button" onClick={() => setSelectedDraftRegionId(range.id)} className={`mr-2 rounded-full px-3 py-1 text-xs ${range.role === 'agent' ? 'bg-purple-100 text-purple-900 dark:bg-purple-900/60 dark:text-purple-100' : range.role === 'customer' ? 'bg-blue-100 text-blue-900 dark:bg-blue-900/60 dark:text-blue-100' : 'bg-amber-100 text-amber-900 dark:bg-amber-900/50 dark:text-amber-100'}`}>
+                      {range.role === 'agent' ? 'Nhân viên' : range.role === 'customer' ? 'Khách hàng' : 'Chưa gán'} · {timedWords.filter((word) => word.wordId >= range.startWordId && word.wordId <= range.endWordId).map((word) => word.text).join(' ').slice(0, 80)}
+                    </button>
                   ))}
-                </select>
-                <button
-                  type="button"
-                  disabled={isConfirmingSpeakerRoles || !selectedAgentSpeakerId}
-                  onClick={handleConfirmSpeakerRole}
-                  className="rounded-lg bg-purple-700 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isConfirmingSpeakerRoles ? 'Đang lưu...' : 'Xác nhận'}
-                </button>
-              </div>
+                  {!roleDraftIsComplete && <p className="text-sm text-amber-800 dark:text-amber-200">Cần phủ đủ mọi từ, không chồng lấn và có ít nhất một từ của nhân viên.</p>}
+                  {roleDraftError && <p role="alert" className="text-sm text-red-700 dark:text-red-300">{roleDraftError}</p>}
+                  <button type="button" disabled={!roleDraftIsComplete || isConfirmingWordRoles} onClick={handleConfirmWordRoles} className="rounded-lg bg-purple-700 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">
+                    {isConfirmingWordRoles ? 'Đang lưu...' : isConfirmedMonoRoleMap ? 'Lưu thay đổi và tính lại điểm' : 'Xác nhận và tính lại điểm'}
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  {hasMultipleChannels ? (
+                    <select value={selectedAgentSpeakerId} onChange={(event) => setSelectedAgentSpeakerId(event.target.value)} className="rounded-lg border border-purple-200 bg-white px-3 py-2 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100">
+                      <option value="">Chọn kênh là nhân viên</option>
+                      {Array.from({ length: numChannels }, (_, channel) => (
+                        <option key={channel} value={`CHANNEL_${channel}`}>Kênh {channel + 1} là nhân viên</option>
+                      ))}
+                    </select>
+                  ) : diarization?.speakers.length ? (
+                    <select value={selectedAgentSpeakerId} onChange={(event) => setSelectedAgentSpeakerId(event.target.value)} className="rounded-lg border border-purple-200 bg-white px-3 py-2 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100">
+                      <option value="">Chọn người nói là nhân viên</option>
+                      {diarization.speakers.map((speaker, index) => <option key={speaker.speaker_id} value={speaker.speaker_id}>{speaker.role === 'agent' ? 'Nhân viên' : speaker.role === 'customer' ? 'Khách hàng' : `Người nói ${index + 1}`}</option>)}
+                    </select>
+                  ) : (
+                    <p className="text-sm text-gray-700 dark:text-gray-300">Bản ghi này chưa có mã từ Whisper để phân vai thủ công. Dữ liệu phiên âm hiện có vẫn được giữ nguyên.</p>
+                  )}
+                  {(hasMultipleChannels || diarization?.speakers.length) && <button type="button" disabled={isConfirmingSpeakerRoles || !selectedAgentSpeakerId} onClick={handleConfirmSpeakerRole} className="rounded-lg bg-purple-700 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">{isConfirmingSpeakerRoles ? 'Đang lưu...' : canAdminCorrectStereo ? 'Lưu thay đổi và tính lại điểm' : 'Xác nhận và tính lại điểm'}</button>}
+                </div>
+              )}
             </div>
           </div>
         )}
 
-        {diarization && diarization.status !== 'completed' && diarization.status !== 'disabled' && (
+        {isRolePending && !isAdmin && (
           <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
-            Chưa thể xác nhận vai trò người nói: {diarization.error?.message ?? diarization.status}.
+            Đang chờ quản trị viên xác nhận vai trò người nói. Bạn vẫn có thể nghe bản ghi và xem phiên âm.
+          </div>
+        )}
+
+        {diarization && diarization.status === 'failed' && (
+          <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+            Không thể tải dữ liệu người nói: {diarization.error?.message ?? diarization.status}.
           </div>
         )}
 
@@ -798,6 +1104,7 @@ export const Call = () => {
             callInfo={callInfo}
             Stt={mediaFileResult?.stt}
             currentPlayerTime={currentTime}
+            onSeek={(time) => wavesurferRef.current?.setTime(time)}
           />
         )}
         {activeTab === CallTab.Checklists && (

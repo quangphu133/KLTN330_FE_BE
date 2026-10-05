@@ -4,7 +4,7 @@ Next.js frontend chạy ở cổng `3000` và gọi FastAPI backend ở cổng `
 
 ```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 

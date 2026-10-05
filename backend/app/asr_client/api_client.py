@@ -1,5 +1,5 @@
 """Small Python client for the remote BuzzASR job API."""
-# Sao chép từ buzzasr_bundle/client/api_client.py
+# Copied from whisper_bundle/client/api_client.py
 
 from __future__ import annotations
 

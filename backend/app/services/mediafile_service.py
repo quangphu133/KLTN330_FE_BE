@@ -24,8 +24,13 @@ class MediaFileService:
             if record.compliance_score is not None
             else None
         )
-        diarization = (record.analysis_data or {}).get("diarization") or {}
-        role_mapping = diarization.get("role_mapping") or {}
+        analysis_data = record.analysis_data or {}
+        diarization = analysis_data.get("diarization") or {}
+        audio_metadata = analysis_data.get("audio_metadata") or {}
+        role_mapping = analysis_data.get("speaker_attribution") or diarization.get("role_mapping") or {}
+        effective_transcription_status = transcription_status
+        if role_mapping.get("status") == "pending" and record.transcript:
+            effective_transcription_status = "needs_confirmation"
 
         return {
             "id": record.id,
@@ -34,8 +39,8 @@ class MediaFileService:
             "gptChecklist": None,
             "gptSummary": None,
             "totalCount": total_count,
-            "numChannels": 1,
-            "sampleRate": 8000,
+            "numChannels": audio_metadata.get("num_channels", 1),
+            "sampleRate": audio_metadata.get("sample_rate", 8000),
             "duration": record.audio_duration or 0,
             "telesaleId": record.telesale_id,
             "telesaleName": telesale_name,
@@ -71,11 +76,11 @@ class MediaFileService:
             },
             "filteredKeywordsCount": len(record.violations),
             "complianceScore": record.compliance_score,
-            "transcriptionStatus": transcription_status,
+            "transcriptionStatus": effective_transcription_status,
             "transcriptionError": None,
             "diarizationStatus": diarization.get("status"),
             "speakerRoleStatus": role_mapping.get("status"),
-            "speakerCount": len(diarization.get("speakers") or []),
+            "speakerCount": len(diarization.get("speakers") or []) or (2 if audio_metadata.get("num_channels") == 2 else 0),
         }
 
     @staticmethod
@@ -146,21 +151,70 @@ class MediaFileService:
         diarization = analysis_data.get("diarization") or {}
         role_mapping = diarization.get("role_mapping") or {}
 
+        speaker_attribution = analysis_data.get("speaker_attribution") or {}
+        role_mapping = speaker_attribution or diarization.get("role_mapping") or {}
         diarization_utterances = diarization.get("utterances") or []
         source_utterances = diarization_utterances or [
             {
+                "id": item.get("id", index),
                 "speaker_id": item.get("speaker_id"),
                 "speaker": item.get("speaker", "unknown"),
                 "start": item.get("start", item.get("start_time", 0.0)),
                 "end": item.get("end", item.get("end_time", 0.0)),
+                "channel": item.get("channel", 0),
                 "text": item.get("text", ""),
                 "words": item.get("words", []),
             }
-            for item in analysis_data.get("segments") or []
+            for index, item in enumerate(analysis_data.get("segments") or [])
         ]
+        word_role_by_id = {}
+        role_assignments = role_mapping.get("assignments") or []
+        if isinstance(role_assignments, list):
+            indexed_words = [word for utterance in source_utterances for word in utterance.get("words") or []]
+            word_positions = {word.get("id"): index for index, word in enumerate(indexed_words)}
+            for assignment in role_assignments:
+                if not isinstance(assignment, dict):
+                    continue
+                start_index = word_positions.get(assignment.get("start_word_id"))
+                end_index = word_positions.get(assignment.get("end_word_id"))
+                if start_index is not None and end_index is not None and end_index >= start_index:
+                    for word in indexed_words[start_index:end_index + 1]:
+                        word_role_by_id[word.get("id")] = assignment.get("role")
+        if word_role_by_id or isinstance(role_assignments, dict):
+            derived_utterances = []
+            for utterance in source_utterances:
+                words = utterance.get("words") or []
+                if not words:
+                    derived_utterances.append(utterance)
+                    continue
+                groups = []
+                for word in words:
+                    role = word_role_by_id.get(word.get("id"))
+                    if role is None and isinstance(role_assignments, dict):
+                        role = role_assignments.get(f"CHANNEL_{utterance.get('channel', 0)}")
+                    if role is None and utterance.get("speaker") in {"agent", "customer"}:
+                        role = utterance.get("speaker")
+                    if not groups or groups[-1][0] != role:
+                        groups.append((role, []))
+                    groups[-1][1].append(word)
+                for role, grouped_words in groups:
+                    text = " ".join(str(word.get("word") or "").strip() for word in grouped_words).strip()
+                    if not text:
+                        continue
+                    derived_utterances.append({
+                        "id": grouped_words[0].get("id", utterance.get("id")),
+                        "channel": utterance.get("channel", 0),
+                        "speaker_id": utterance.get("speaker_id"),
+                        "speaker": role or "unknown",
+                        "start": grouped_words[0].get("start", utterance.get("start")),
+                        "end": grouped_words[-1].get("end", utterance.get("end")),
+                        "text": text,
+                        "words": grouped_words,
+                    })
+            source_utterances = derived_utterances
         chunks = []
         text_cursor = 0
-        for utterance in source_utterances:
+        for chunk_id, utterance in enumerate(source_utterances):
             utterance_text = str(utterance.get("text", "")).strip()
             if not utterance_text:
                 continue
@@ -174,21 +228,29 @@ class MediaFileService:
                     continue
                 word_start = word.get("start")
                 word_end = word.get("end")
-                if word_start is None or word_end is None:
-                    word_cursor += len(word_text) + 1
-                    continue
                 word_start_char = word_cursor
                 word_end_char = word_start_char + len(word_text)
+                role = word_role_by_id.get(word.get("id"))
+                if role is None and isinstance(role_assignments, dict):
+                    role = role_assignments.get(f"CHANNEL_{utterance.get('channel', 0)}")
+                if role is None and utterance.get("speaker") in {"agent", "customer"}:
+                    role = utterance.get("speaker")
                 regions.append({
-                    "channel": 0,
+                    "wordId": word.get("id"),
+                    "channel": utterance.get("channel", 0),
                     "startChar": word_start_char,
                     "endChar": word_end_char,
                     "startTime": word_start,
                     "endTime": word_end,
+                    "role": role,
                 })
                 word_cursor = word_end_char + 1
+            speaker = utterance.get("speaker", "unknown")
+            if isinstance(role_assignments, dict):
+                speaker = role_assignments.get(f"CHANNEL_{utterance.get('channel', 0)}", speaker)
             chunks.append({
-                "channel": 0,
+                "id": utterance.get("id", chunk_id),
+                "channel": utterance.get("channel", 0),
                 "startChar": start_char,
                 "endChar": end_char,
                 "startTime": utterance.get("start"),
@@ -196,17 +258,30 @@ class MediaFileService:
                 "text": utterance_text,
                 "regions": regions,
                 "speakerId": utterance.get("speaker_id"),
-                "speaker": utterance.get("speaker", "unknown"),
+                "speaker": speaker,
             })
             text_cursor = end_char + 1
 
         # Map violations → keywordsSearchResult regions
         kw_regions = []
+        violation_names = {
+            "missing_greeting": "Thiếu lời chào bắt buộc",
+            "missing_closing": "Thiếu lời cảm ơn hoặc chào kết thúc",
+            "sensitive_keyword": "Từ khóa nhạy cảm",
+            "forced_selling": "Ép buộc khách hàng",
+            "abusive_language": "Ngôn từ thiếu chuẩn mực",
+            "negative_attitude": "Thái độ thiếu tích cực",
+        }
         for v in record.violations:
             kw_regions.append({
                 "category": 0,
                 "categoryName": v.violation_type,
+                "displayName": violation_names.get(v.violation_type, "Lỗi vi phạm"),
                 "phrase": v.keyword_detected,
+                "snippet": v.snippet,
+                "severity": v.severity,
+                "deduction": v.deduction,
+                "hasTimestamp": not v.violation_type.startswith("missing_"),
                 "startChar": 0,
                 "endChar": 0,
                 "startTime": v.timestamp or 0.0,
@@ -234,6 +309,7 @@ class MediaFileService:
             "simultaneousSilence": {"regions": []},
             "keywordsSearchResult": {"regions": kw_regions},
             "diarization": diarization,
+            "audioMetadata": analysis_data.get("audio_metadata"),
             "roleMapping": role_mapping,
         }
 

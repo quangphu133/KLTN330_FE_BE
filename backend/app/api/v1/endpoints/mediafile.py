@@ -17,7 +17,7 @@ from app.db.database import get_db
 from app.core.config import settings
 from app.services.mediafile_service import MediaFileService
 from app.services.call_service import CallService
-from app.schemas.mediafile_schema import SpeakerRoleUpdate
+from app.schemas.mediafile_schema import SpeakerRoleUpdate, WordRoleUpdate
 from app.api.v1.endpoints.auth import get_current_user, require_admin
 from app.models.user import User
 
@@ -173,16 +173,41 @@ def confirm_speaker_roles(
     file_id: int,
     payload: SpeakerRoleUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     record = db.query(CallRecord).filter(CallRecord.id == file_id).first()
-    if record is None or (current_user.role != "admin" and record.telesale_id != current_user.id):
+    if record is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy bản ghi cuộc gọi")
     record = CallService.confirm_speaker_roles(
         db,
         call_id=file_id,
         agent_speaker_id=payload.agentSpeakerId,
+        actor_id=current_user.id,
     )
+    if record.compliance_score is not None:
+        from app.services.notification_service import notify_call_scored
+
+        notify_call_scored(db, record)
+    return MediaFileService.get_result(db, record.id)
+
+
+@router.put("/{file_id}/word-roles")
+def confirm_word_roles(
+    file_id: int,
+    payload: WordRoleUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    record = CallService.confirm_word_roles(
+        db,
+        call_id=file_id,
+        assignments=payload.assignments,
+        actor_id=current_user.id,
+    )
+    if record.compliance_score is not None:
+        from app.services.notification_service import notify_call_scored
+
+        notify_call_scored(db, record)
     return MediaFileService.get_result(db, record.id)
 
 

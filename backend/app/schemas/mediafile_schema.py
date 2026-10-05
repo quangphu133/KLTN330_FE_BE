@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Literal
 from datetime import datetime
 
 
@@ -84,3 +84,13 @@ class MediaFileResultResponse(BaseModel):
 
 class SpeakerRoleUpdate(BaseModel):
     agentSpeakerId: str = Field(..., min_length=1)
+
+
+class WordRoleAssignment(BaseModel):
+    startWordId: int
+    endWordId: int
+    role: Literal["agent", "customer"]
+
+
+class WordRoleUpdate(BaseModel):
+    assignments: List[WordRoleAssignment] = Field(..., min_length=1)

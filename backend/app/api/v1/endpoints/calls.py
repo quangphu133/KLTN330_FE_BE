@@ -29,8 +29,28 @@ def create_call_record(call_in: CallRecordCreate, db: Session = Depends(get_db),
     Hệ thống tự động chạy Regex Engine đối soát luật, tính điểm tuân thủ và lưu vết vi phạm.
     """
     if current_user.role != "admin":
+        ai_result = call_in.ai_result
+        diarization = ai_result.diarization if ai_result else None
+        untrusted_channel_data = bool(ai_result and (
+            ai_result.model == "large-v3"
+            or ai_result.audio_metadata is not None
+            or ai_result.channel_quality is not None
+            or ai_result.speaker_attribution is not None
+            or diarization is not None
+            or any(segment.channel is not None or segment.words for segment in ai_result.segments or [])
+        ))
+        employee_role_claim = bool(ai_result and any(
+            (segment.speaker or "").strip().lower() in {"agent", "customer"}
+            for segment in ai_result.segments or []
+        ))
+        if untrusted_channel_data or employee_role_claim:
+            raise HTTPException(status_code=403, detail="Chỉ quản trị viên được xác nhận người nói")
         call_in.telesale_id = current_user.id
-    return CallService.create_call(db=db, call_in=call_in)
+    return CallService.create_call(
+        db=db,
+        call_in=call_in,
+        allow_scoring=current_user.role == "admin",
+    )
 
 @router.get("/", response_model=List[CallRecordResponse], summary="Lấy danh sách các cuộc gọi")
 def get_call_records(
